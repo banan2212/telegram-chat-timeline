@@ -36,13 +36,13 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')
 
 
-def command(args, timeout=60, output=None, label=None, include_stderr=False):
+def command(args, timeout=60, output=None, label=None, include_stderr=False, acceptable_codes=(0,)):
     completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if output is not None:
         with (output / 'native-commands.log').open('a', encoding='utf-8') as stream:
             stream.write(f'\n[{label or args[0]}] exit={completed.returncode}\n')
             stream.write(completed.stdout[-16000:] + completed.stderr[-16000:] + '\n')
-    require(completed.returncode == 0, f'{label or args[0]} failed with exit {completed.returncode}')
+    require(completed.returncode in acceptable_codes, f'{label or args[0]} failed with exit {completed.returncode}')
     return (completed.stdout + ('\n' + completed.stderr if include_stderr else '')).strip()
 
 
@@ -260,7 +260,9 @@ def run_smoke(output, run_id, source_sha):
     help_text = []
     for action in ('create', 'boot', 'bootstatus', 'install', 'launch', 'io'):
         help_text.append(command(['xcrun', 'simctl', 'help', action], timeout=30, include_stderr=True))
-    help_text.append(command(['ditto', '-h'], timeout=30, include_stderr=True))
+    # Apple's ditto prints usage with exit 1. This exception is diagnostic-only;
+    # extraction, boot, install and launch continue to require exit 0.
+    help_text.append(command(['ditto', '-h'], timeout=30, include_stderr=True, acceptable_codes=(0, 1)))
     (output / 'simctl-help.txt').write_text('\n'.join(help_text), encoding='utf-8')
     name = 'ChatTimelineSmoke-' + os.environ['GITHUB_RUN_ID']
     device_id = command(['xcrun', 'simctl', 'create', name, device_type['identifier'], runtime['identifier']], timeout=45)
