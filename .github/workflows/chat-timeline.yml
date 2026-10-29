@@ -1,0 +1,184 @@
+name: Chat Timeline - build and probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Probe only, pinned upstream baseline, or this workflow commit with the feature
+        type: choice
+        options: [probe, baseline, feature]
+        default: probe
+        required: true
+      target:
+        description: Simulator needs no Apple account; device produces a self-signed candidate only
+        type: choice
+        options: [simulator, device]
+        default: simulator
+        required: true
+      api_source:
+        description: Public upstream sample is for testing only; own secrets are needed for distribution
+        type: choice
+        options: [upstream-test, secrets]
+        default: upstream-test
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-timeline-${{ github.ref }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Standard public-repository runner; never choose a paid large/xlarge runner here.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: xcode-27
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_TARGET: ${{ inputs.target }}
+      API_SOURCE: ${{ inputs.api_source }}
+      SOURCE_KIND: ${{ inputs.operation == 'feature' && 'feature' || 'baseline' }}
+      EXPECTED_REVISION: ${{ inputs.operation == 'feature' && github.sha || 'fb0e62ba8a147f0821da6aa63c09da7d79a10111' }}
+      SOURCE_REPOSITORY: ${{ inputs.operation == 'feature' && github.repository || 'TelegramMessenger/Telegram-iOS' }}
+      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+    steps:
+      - name: Checkout CI tools from the dispatched commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          sparse-checkout: ci/chat-timeline
+          persist-credentials: false
+
+      - name: Checkout the exact selected source revision
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.EXPECTED_REVISION }}
+          path: source
+          fetch-depth: 1
+          sparse-checkout: |
+            build-system
+            Telegram
+          submodules: false
+          persist-credentials: false
+
+      - name: Select installed pinned Xcode if present
+        run: |
+          if [ -d /Applications/Xcode_27.1.app/Contents/Developer ]; then
+            sudo xcode-select --switch /Applications/Xcode_27.1.app/Contents/Developer
+          fi
+
+      - name: Record available storage and installed Xcode applications
+        run: |
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP" /Applications > "$RUNNER_TEMP/chat-timeline-volumes.txt"
+          printf '\nInstalled Xcode applications:\n' >> "$RUNNER_TEMP/chat-timeline-volumes.txt"
+          find /Applications -maxdepth 1 -name 'Xcode*.app' -print >> "$RUNNER_TEMP/chat-timeline-volumes.txt"
+          cat "$RUNNER_TEMP/chat-timeline-volumes.txt"
+
+      - name: Probe actual toolchain, resources and signing
+        run: |
+          python3 automation/ci/chat-timeline/bootstrap.py probe \
+            --source source --output "$RUNNER_TEMP/chat-timeline"
+
+      - name: Enforce preflight and prepare temporary test configuration
+        if: ${{ inputs.operation != 'probe' }}
+        run: |
+          python3 automation/ci/chat-timeline/bootstrap.py prepare \
+            --source source --output "$RUNNER_TEMP/chat-timeline"
+
+      - name: Materialize full source and upstream-relative submodules
+        if: ${{ inputs.operation != 'probe' }}
+        timeout-minutes: 45
+        working-directory: source
+        run: |
+          git sparse-checkout disable
+          # The fork does not own ../rlottie.git, ../tgcalls.git, etc.
+          # Override only remote URL resolution in this command; keep HEAD unchanged.
+          git -c remote.origin.url=https://github.com/TelegramMessenger/Telegram-iOS.git \
+            submodule init
+          # Do not pass the top-level URL override into recursive child repositories.
+          git submodule update --init --recursive --depth 1 --jobs 2
+          python3 ../automation/ci/chat-timeline/bootstrap.py resources \
+            --source . --output "$RUNNER_TEMP/chat-timeline"
+          # This upstream Make.py declares --bazelArguments but build() does not use it.
+          printf '\nbuild --jobs=2\n' >> .bazelrc
+          if [ "$BUILD_TARGET" = simulator ]; then
+            # Existing //Telegram bool_flag. Not a Make.py build CLI flag.
+            printf 'build --//Telegram:disableProvisioningProfiles=true\n' >> .bazelrc
+          fi
+
+      - name: Import and check public fixture key for device candidate only
+        if: ${{ inputs.operation != 'probe' && inputs.target == 'device' }}
+        working-directory: source
+        run: |
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+          IDENTITY="$(openssl x509 -inform DER -in build-system/fake-codesigning/certs/Public.cer -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
+          cp /usr/bin/true "$RUNNER_TEMP/chat-timeline/signing-probe"
+          codesign --force --sign "$IDENTITY" --keychain temp.keychain "$RUNNER_TEMP/chat-timeline/signing-probe"
+          codesign --verify --strict "$RUNNER_TEMP/chat-timeline/signing-probe"
+
+      - name: Build selected source with the upstream wrapper
+        if: ${{ inputs.operation != 'probe' }}
+        timeout-minutes: 285
+        working-directory: source
+        run: |
+          python3 ../automation/ci/chat-timeline/bootstrap.py prepare \
+            --source . --output "$RUNNER_TEMP/chat-timeline"
+          if [ "$BUILD_TARGET" = simulator ]; then
+            CONFIGURATION=debug_sim_arm64
+            SIGNING=(--xcodeManagedCodesigning)
+          else
+            CONFIGURATION=release_arm64
+            SIGNING=(--codesigningInformationPath=build-system/fake-codesigning)
+          fi
+          set -o pipefail
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$RUNNER_TEMP/chat-timeline-bazel" \
+            build \
+            --configurationPath="$RUNNER_TEMP/chat-timeline/configuration.json" \
+            "${SIGNING[@]}" \
+            --configuration="$CONFIGURATION" \
+            --buildNumber="$GITHUB_RUN_NUMBER" \
+            2>&1 | tee "$RUNNER_TEMP/chat-timeline/build.log"
+
+      - name: Collect the current build and verify its platform
+        if: ${{ inputs.operation != 'probe' }}
+        run: |
+          python3 automation/ci/chat-timeline/bootstrap.py collect \
+            --source source --output "$RUNNER_TEMP/chat-timeline"
+
+      - name: Upload simulator archive or self-signed device candidate
+        if: ${{ inputs.operation != 'probe' && success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-${{ env.SOURCE_KIND }}-${{ inputs.target }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/chat-timeline/artifacts/*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload diagnostic reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-${{ env.SOURCE_KIND }}-${{ inputs.target }}-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/chat-timeline/preflight.json
+            ${{ runner.temp }}/chat-timeline/resources-after-checkout.json
+            ${{ runner.temp }}/chat-timeline/submodules.txt
+            ${{ runner.temp }}/chat-timeline-volumes.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove API configuration from temporary runner
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'chat-timeline/configuration.json').unlink(missing_ok=True)
+          PY

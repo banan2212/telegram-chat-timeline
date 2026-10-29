@@ -1,0 +1,52 @@
+name: Chat Timeline - focused checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  date-selection:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: xcode-27
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            submodules/TelegramUI/Sources
+            Tests/ChatTimeline
+            ci/chat-timeline
+            build-system/fake-codesigning
+          persist-credentials: false
+          submodules: false
+
+      - name: Require the pinned installed Xcode
+        run: |
+          if [ -d /Applications/Xcode_27.1.app/Contents/Developer ]; then
+            sudo xcode-select --switch /Applications/Xcode_27.1.app/Contents/Developer
+          fi
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 27.1'
+          xcrun swiftc --version
+          printf 'Source revision: %s\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check Swift syntax of the new feature files
+        run: |
+          test -f submodules/TelegramUI/Sources/ChatTimelineDateSelection.swift
+          for file in submodules/TelegramUI/Sources/ChatTimeline*.swift; do
+            xcrun swiftc -frontend -parse "$file"
+          done
+
+      - name: Compile and run pure Foundation date-selection regression checks
+        run: |
+          xcrun swiftc \
+            submodules/TelegramUI/Sources/ChatTimelineDateSelection.swift \
+            Tests/ChatTimeline/TimelineDateSelectionChecks.swift \
+            -o "$RUNNER_TEMP/timeline-date-tests"
+          "$RUNNER_TEMP/timeline-date-tests"
+          printf '%s\n' 'Swift syntax and Foundation date-selection checks passed. Full app compilation, native UI behavior and iPhone tests remain separate.' >> "$GITHUB_STEP_SUMMARY"
