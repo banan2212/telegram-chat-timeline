@@ -4,6 +4,8 @@ import AccountContext
 import ChatControllerInteraction
 import ChatInterfaceState
 import Display
+import OverlayStatusController
+import PresentationDataUtils
 import SwiftSignalKit
 import TelegramCore
 import TelegramPresentationData
@@ -270,6 +272,29 @@ extension ChatControllerImpl {
     private func validateChatTimelineMessage(id: EngineMessage.Id, peerId: EnginePeer.Id, completion: @escaping (EngineMessage) -> Void) {
         self.cancelChatTimelineNavigation()
         let generation = self.chatTimelineNavigationGeneration
+        // Match the native peer-resolution flow: fast requests stay unobtrusive, while a slow
+        // fresh-message check offers the same cancellable progress overlay as other navigation.
+        let progressSignal = Signal<Never, NoError> { [weak self] _ in
+            guard let self, self.chatTimelineNavigationGeneration == generation, self.isChatTimelineAvailable(peerId: peerId) else {
+                return EmptyDisposable
+            }
+            let controller = OverlayStatusController(theme: self.presentationData.theme, type: .loading(cancelled: { [weak self] in
+                guard let self, self.chatTimelineNavigationGeneration == generation else {
+                    return
+                }
+                self.cancelChatTimelineNavigation()
+            }))
+            self.present(controller, in: .window(.root))
+            return ActionDisposable { [weak controller] in
+                Queue.mainQueue().async {
+                    controller?.dismiss()
+                }
+            }
+        }
+        |> runOn(Queue.mainQueue())
+        |> delay(0.15, queue: Queue.mainQueue())
+        let progressDisposable = progressSignal.start()
+
         self.chatTimelineNavigationDisposable.set((self.context.engine.messages.fetchChatTimelineMessage(id: id)
         |> map { message -> ChatTimelineValidationResult in
             if let message {
@@ -287,7 +312,11 @@ extension ChatControllerImpl {
         }
         |> timeout(10.0, queue: Queue.mainQueue(), alternate: .single(.failed))
         |> take(1)
+        |> afterDisposed {
+            progressDisposable.dispose()
+        }
         |> deliverOnMainQueue).startStrict(next: { [weak self] result in
+            progressDisposable.dispose()
             guard let self, self.chatTimelineNavigationGeneration == generation, self.isChatTimelineAvailable(peerId: peerId) else {
                 return
             }

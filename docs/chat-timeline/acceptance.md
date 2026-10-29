@@ -14,6 +14,7 @@ Every row starts unverified. Record source commit, build run, device/OS, reprodu
 | New messages during navigation | Return preserves original reading location while new messages arrive at the bottom |
 | Cancel and dismissal | Opening, scrubbing, cancelling, or dismissing does not change the underlying history position |
 | Error states | Airplane/connection failure, delayed response, deleted target, inaccessible history, and empty result are distinct from a confirmed empty date |
+| Slow confirmation or return | A delayed fresh-message check shows cancellable native progress; cancelling, timing out, leaving or switching the chat removes it and prevents a late jump |
 | Scope changes | Closing the chat or switching chat invalidates outstanding preview/confirmation callbacks |
 | Themes and text | Light and dark themes, increased text size, VoiceOver labels/actions, long author/text, and media-only previews remain usable |
 | Reduced motion | Opening/closing and preview changes obey Reduce Motion; essential navigation remains available |
