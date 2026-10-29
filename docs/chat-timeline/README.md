@@ -29,6 +29,8 @@ CI can use the public sample configuration from the pinned official source for t
 
 The simulator archive is not an iPhone IPA. A self-signed device candidate still needs legitimate local signing with a separate application identity. It must not replace the user's primary Telegram installation.
 
+See [physical iPhone installation from Windows](device-installation.md) for the possible free signing path, Telegram's App Group requirements, and the remaining installation/launch evidence. That guide is preparation, not proof that the candidate is already installable.
+
 ## Submission materials
 
 - [Demo storyboard and capture plan](demo-storyboard.md)
