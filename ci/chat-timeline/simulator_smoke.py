@@ -36,12 +36,36 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')
 
 
+def command_evidence(output, label, status, started_at, elapsed, stdout, stderr):
+    if output is None:
+        return
+    summary = f'[{label}] {status} started={started_at} elapsed={elapsed:.3f}s'
+    with (output / 'native-commands.log').open('a', encoding='utf-8') as stream:
+        stream.write('\n' + summary + '\n')
+        for name, value in (('stdout', stdout), ('stderr', stderr)):
+            # TimeoutExpired carries bytes (or None), even with text=True.
+            if isinstance(value, bytes):
+                value = value.decode('utf-8', errors='replace')
+            value = value or ''
+            stream.write(f'[{name}; last 16000 characters; truncated={len(value) > 16000}]\n{value[-16000:]}\n')
+    print(summary, flush=True)
+
+
 def command(args, timeout=60, output=None, label=None, include_stderr=False, acceptable_codes=(0,)):
-    completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if output is not None:
-        with (output / 'native-commands.log').open('a', encoding='utf-8') as stream:
-            stream.write(f'\n[{label or args[0]}] exit={completed.returncode}\n')
-            stream.write(completed.stdout[-16000:] + completed.stderr[-16000:] + '\n')
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            command_evidence(output, label or args[0], f'timeout={timeout}s', started_at,
+                             time.monotonic() - started, exc.stdout, exc.stderr)
+        except Exception:
+            # A full/unavailable evidence filesystem must not replace the timeout.
+            pass
+        raise
+    command_evidence(output, label or args[0], f'exit={completed.returncode}', started_at,
+                     time.monotonic() - started, completed.stdout, completed.stderr)
     require(completed.returncode in acceptable_codes, f'{label or args[0]} failed with exit {completed.returncode}')
     return (completed.stdout + ('\n' + completed.stderr if include_stderr else '')).strip()
 
@@ -236,6 +260,48 @@ def crash_summary(output, executable, start, device_id):
     return result
 
 
+def install_diagnostics(output, device_id, bundle_identifier):
+    # Read-only, fresh unauthenticated simulator; no full sysdiagnose/log archive.
+    # Every probe has its own cap. Unsupported or stalled diagnostics remain unknown.
+    report = {'scope': 'installation_failure_diagnostics', 'install_retried': False,
+              'disk_free_bytes': shutil.disk_usage(output).free, 'checks': []}
+    if hasattr(os, 'getloadavg'):
+        report['host_load_average'] = list(os.getloadavg())
+    probes = [
+        ('app container readback', ['xcrun', 'simctl', 'get_app_container', device_id, bundle_identifier, 'app'], 15),
+        ('simulator installation log', ['xcrun', 'simctl', 'spawn', device_id, 'log', 'show',
+            '--style', 'compact', '--last', '5m', '--info', '--predicate',
+            'process == "installd" OR process == "installcoordinationd" OR subsystem CONTAINS[c] "MobileInstallation"'], 20),
+        ('host CoreSimulator log', ['/usr/bin/log', 'show', '--style', 'compact', '--last', '5m',
+            '--info', '--predicate', 'process == "CoreSimulatorService" OR subsystem BEGINSWITH "com.apple.CoreSimulator"'], 20),
+    ]
+    for label, args, timeout in probes:
+        item = {'probe': label, 'timeout_seconds': timeout, 'result': 'unknown'}
+        try:
+            value = command(args, timeout=timeout, output=output, label=label,
+                            include_stderr=label != 'app container readback')
+            item['result'] = 'collected'
+            if label == 'app container readback':
+                item['container_directory_exists'] = bool(value) and Path(value).is_dir()
+        except Exception as exc:
+            item['failure'] = f'{type(exc).__name__}: {exc}'[:1000]
+        report['checks'].append(item)
+    save(output / 'install-diagnostics.json', report)
+
+
+def install_app(output, device_id, app_path, bundle_identifier):
+    try:
+        command(['xcrun', 'simctl', 'install', device_id, str(app_path)],
+                timeout=120, output=output, label='install')
+    except Exception:
+        try:
+            install_diagnostics(output, device_id, bundle_identifier)
+        except Exception as exc:
+            # Diagnostics must never replace the original install failure.
+            print(f'Installation diagnostics unavailable: {type(exc).__name__}: {exc}', flush=True)
+        raise
+
+
 def run_smoke(output, run_id, source_sha):
     require(platform.system() == 'Darwin' and platform.machine() == 'arm64', 'Native Apple Silicon macOS required')
     require(os.environ.get('GITHUB_RUN_ID', '').isdigit(), 'This helper requires its GitHub job context')
@@ -262,6 +328,12 @@ def run_smoke(output, run_id, source_sha):
     help_text = []
     for action in ('create', 'boot', 'bootstatus', 'install', 'launch', 'io'):
         help_text.append(command(['xcrun', 'simctl', 'help', action], timeout=30, include_stderr=True))
+    for args in (['xcrun', 'simctl', 'help', 'get_app_container'], ['xcrun', 'simctl', 'help', 'spawn'],
+                 ['/usr/bin/log', 'help', 'show']):
+        try:
+            help_text.append(command(args, timeout=10, include_stderr=True))
+        except Exception as exc:
+            help_text.append(f'Optional diagnostic help unavailable: {args}: {type(exc).__name__}: {exc}')
     # Apple's ditto prints usage with exit 1. This exception is diagnostic-only;
     # extraction, boot, install and launch continue to require exit 0.
     help_text.append(command(['ditto', '-h'], timeout=30, include_stderr=True, acceptable_codes=(0, 1)))
@@ -282,7 +354,7 @@ def run_smoke(output, run_id, source_sha):
     try:
         command(['xcrun', 'simctl', 'boot', device_id], timeout=45, output=output, label='boot')
         command(['xcrun', 'simctl', 'bootstatus', device_id, '-b'], timeout=180, output=output, label='bootstatus')
-        command(['xcrun', 'simctl', 'install', device_id, str(app_path)], timeout=120, output=output, label='install')
+        install_app(output, device_id, app_path, main_app['bundle_identifier'])
         launched = command(['xcrun', 'simctl', 'launch', device_id, main_app['bundle_identifier']], timeout=45, output=output, label='launch')
         match = re.search(re.escape(main_app['bundle_identifier']) + r':\s*(\d+)\s*$', launched)
         require(match, 'simctl launch did not return the application PID')
