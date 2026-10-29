@@ -46,6 +46,35 @@ A device candidate inherits the fixture bundle ID so its provisioning matches. *
 
 ## Provenance and limits
 
+### Read-only IPA inspection on Windows
+
+After downloading an artifact, use the standard-library-only inspector. It reads the IPA and manifest without changing them, extracting files, contacting Apple or installing anything:
+
+```sh
+python ci/chat-timeline/inspect_ipa.py Telegram-self-signed-requires-resigning.ipa --manifest manifest.json --source-revision FULL_EXPECTED_SOURCE_SHA --target-ios 26.0 --target device --output ipa-audit.json
+```
+
+Take the expected SHA independently from the selected CI source: the pinned upstream SHA for a baseline, or the dispatched feature commit for a feature build. Do not merely copy a potentially untrusted manifest's SHA into the command. A matching manifest ties the downloaded bytes to that manifest; it is not cryptographically signed source provenance.
+
+The report uses **pass / fail / unknown**. `static_checks=pass` means the implemented static checks found no inconsistency; the overall `result` stays **unknown** because Apple trust, code-page/resource signatures, installation and runtime behavior are not verified. Exit codes: `1` for known failures, `2` for unknown overall status. This inspector cannot currently return overall pass. Argument errors also use argparse's exit code `2`, but do not emit an audit JSON report. Unknown does not establish signature validity or installability; use separate signing and device verification.
+
+Checks include manifest SHA-256/size/source/target; every ZIP member's CRC; duplicate/case-colliding/unsafe paths; actual main app, nested `.app`/`.appex`, frameworks and loose dylib inventory; declared executables; thin/fat Mach-O CPU and `LC_BUILD_VERSION`; declared and actual minimum iOS versions against `--target-ios`. ARM64 alone does not prove a device build: platform `2` is iPhoneOS, `7` is iPhoneSimulator. A legacy minimum-version command without an explicit platform stays unknown. Watch companions are inventoried separately and their watchOS compatibility stays unknown; their version is never compared numerically to iOS 26.
+
+Embedded provisioning XML is parsed as **untrusted metadata**, without claiming CMS verification. The limited report includes only application/team identifiers, App Groups, keychain groups and expiration. Apple IDs, profile names, device UDIDs, certificates and full profiles are never emitted. When an executable contains an XML entitlement slot, it is checked against the profile's identifier/group allowlist and, where supported, its CodeDirectory special-slot hash. That hash match is an internal consistency check, **not** a signature/trust check. DER entitlement blobs are detected but not interpreted or compared to XML; that remains unknown. Nested identifiers/teams and intersections of host/extension groups are reported. A missing shared group is a warning because not every extension needs shared storage.
+
+No unsafe archive path is extracted or followed. Inspected metadata/executables must be regular ZIP members, not symlink entries. Inspection is bounded to 100,000 entries, 8 GiB total uncompressed data, 1 GiB per member and 8 MiB per plist. An unreadable/unsupported format is reported without dumping its contents. These limits can reject oversized archives; that is not a device compatibility finding.
+
+Regression checks: `python -B ci/chat-timeline/test_inspect_ipa.py`. Synthetic fixtures cover corrupted CRC, mismatching manifest/revision, missing executable, simulator code hidden behind device Info.plist, minimum iOS too high, entitlement/group/hash inconsistency, fat bounds, unsafe paths, privacy and the unknown exit status. Fixtures are neither signed nor runnable apps. All nine actual public upstream provisioning files were additionally parsed without exporting identity/device fields; a real built IPA still needs inspection after the build finishes.
+
+Primary format references:
+
+- [Apple Mach-O load commands and platform constants](https://github.com/apple-oss-distributions/xnu/blob/main/EXTERNAL_HEADERS/mach-o/loader.h)
+- [Apple CPU type definitions](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/machine.h)
+- [Apple fat Mach-O layout](https://github.com/apple-oss-distributions/cctools/blob/main/include/mach-o/fat.h)
+- [Apple code-signature blob layouts and hash types](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/cs_blobs.h)
+- [Apple TN3125: provisioning profiles and their trust boundary](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles)
+- [Apple bundle identifier changes and companion targets](https://developer.apple.com/documentation/xcode/changing-the-bundle-identifier)
+
 Checkout uses exact revisions. Fork-relative submodule URLs are resolved against TelegramMessenger in a command-local Git setting, avoiding nonexistent forks such as `banan2212/rlottie`; each submodule must remain at its recorded revision. Artifacts come exclusively from the current `bazel-bin/Telegram/Telegram.ipa`, with ZIP integrity, declared executable and device/simulator platform checks. A SHA-256 manifest records the selected source, build and API mode. No Releases are created. Artifacts expire after three days.
 
 The workflow does not override Xcode/Bazel versions. It selects Xcode 27.1 only if actually installed, then requires the pins in `versions.json`. Upstream `Make.py` does not wire its declared `--bazelArguments` into `build()`, so jobs/provisioning flags are appended only to the temporary CI checkout's `.bazelrc`.
