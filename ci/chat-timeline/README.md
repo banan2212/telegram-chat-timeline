@@ -90,3 +90,23 @@ Sources:
 - [GitHub standard public runners](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)
 
 Local checks can validate Python/YAML syntax, profile dates and public configuration provenance. Windows cannot validate native compilation, keychain import, simulator launch or iPhone behavior. Source investigation used bounded direct reads because the graph project was unavailable; it was not an exhaustive build-system audit.
+
+## Native simulator startup smoke
+
+The separate manual workflow **Chat Timeline - simulator startup smoke** accepts a successful simulator build run from this repository and its independently known source SHA. It uses the standard public `xcode-27` runner for at most 20 minutes. Permissions are `contents: read` and `actions: read`; the built-in short-lived GitHub token is available only during artifact download. No Apple or Telegram login or repository secrets are used.
+
+The first completed baseline is run `40965516815`, source `fb0e62ba8a147f0821da6aa63c09da7d79a10111`. After publishing this smoke workflow on the default branch, it can be dispatched explicitly:
+
+```sh
+gh workflow run chat-timeline-simulator-smoke.yml --repo banan2212/telegram-chat-timeline --ref main -f source_run_id=40965516815 -f expected_source_sha=fb0e62ba8a147f0821da6aa63c09da7d79a10111
+```
+
+The helper checks the successful run, reviewed workflow path, artifact identity/freshness, manifest run/source SHA and IPA hash before launch. Device archives are rejected. Simulator signing/profile unknowns are expected; known static failures or an unproven Mach-O simulator platform stop the job. The outer artifact ZIP permits only the three known artifact files. The IPA is checked before native `ditto -x -k` extraction so executable modes and supported Apple-style relative symlinks survive. Escaping, cyclic, dangling, parent-traversing (`..`) symlinks and archive entries beneath symlinks are rejected; the stricter `..` restriction is intentional. No existing extracted application is reused.
+
+The job chooses an actually installed iOS runtime, preferring **27.1**, and a compatible **iPhone 15** device type if advertised by that runtime. It creates a new simulator, boots it, installs the verified app and launches its real bundle ID. All native commands have bounded timeouts. Native `simctl` PNG screenshots are captured at approximately 2 and 20 seconds; the same application PID must remain alive and non-zombie before and after capture. A launch/install failure, early process exit or matching fresh crash report makes the job fail. No taps, Telegram account login or mock Timeline content are performed.
+
+The resulting startup artifact contains the exact source/build/artifact provenance, selected device/runtime, PID/elapsed observation, native screenshots and their hashes, limited crash summaries, tool help and cleanup evidence. Full crash reports are not uploaded. Cleanup addresses only the UUID/name created by this job and checks its ownership marker. It also runs after failure.
+
+**A passing smoke proves application startup on the reported simulator only.** Screenshots still need visual review. It does not establish Chat Timeline behavior, authenticated history access, iPhone 15/iOS 26 acceptance, or device signing/installability. The real baseline artifact's manifest/SHA/path checks and local Python/YAML/Bash checks passed during preparation; native launch remains unverified until this workflow actually completes.
+
+Apple's [Simulator guide](https://developer.apple.com/library/archive/documentation/IDEs/Conceptual/iOS_Simulator_Guide/InteractingwiththeiOSSimulator/InteractingwiththeiOSSimulator.html) documents native screenshots and `simctl help`; [Xcode release notes](https://developer.apple.com/documentation/Xcode-Release-Notes/xcode-11-release-notes) document `simctl create` and headless screenshot constraints. The workflow records help from its actual installed `simctl` and `ditto` rather than assuming every Xcode version has the same tool behavior.

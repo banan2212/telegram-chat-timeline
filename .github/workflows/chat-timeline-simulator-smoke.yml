@@ -1,0 +1,92 @@
+name: Chat Timeline - simulator startup smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful simulator build run ID from this repository
+        type: string
+        required: true
+      expected_source_sha:
+        description: Full source SHA expected inside that artifact (upstream pin for a baseline)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: chat-timeline-simulator-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  startup:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: xcode-27
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: ci/chat-timeline
+          submodules: false
+          persist-credentials: false
+
+      - name: Select the installed pinned Xcode
+        run: |
+          if [ -d /Applications/Xcode_27.1.app/Contents/Developer ]; then
+            sudo xcode-select --switch /Applications/Xcode_27.1.app/Contents/Developer
+          fi
+          XCODE_INFO="$(xcodebuild -version)"
+          printf '%s\n' "$XCODE_INFO"
+          grep -qx 'Xcode 27.1' <<< "$XCODE_INFO"
+
+      - name: Fetch only the successful simulator artifact from this repository
+        timeout-minutes: 5
+        env:
+          # Only the built-in, short-lived read token. No Apple/Telegram/repository secrets.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ci/chat-timeline/simulator_smoke.py fetch \
+            --run-id "$SOURCE_RUN_ID" --source-sha "$EXPECTED_SOURCE_SHA" \
+            --output "$RUNNER_TEMP/chat-timeline-smoke"
+
+      - name: Create a simulator, install, launch and observe the real app
+        timeout-minutes: 12
+        run: |
+          python3 ci/chat-timeline/simulator_smoke.py run \
+            --run-id "$SOURCE_RUN_ID" --source-sha "$EXPECTED_SOURCE_SHA" \
+            --output "$RUNNER_TEMP/chat-timeline-smoke"
+
+      - name: Clean up only the simulator created by this smoke job
+        if: ${{ always() }}
+        timeout-minutes: 2
+        run: |
+          python3 ci/chat-timeline/simulator_smoke.py cleanup \
+            --run-id "$SOURCE_RUN_ID" --source-sha "$EXPECTED_SOURCE_SHA" \
+            --output "$RUNNER_TEMP/chat-timeline-smoke"
+
+      - name: Upload actual startup evidence, including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-simulator-startup-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/chat-timeline-smoke/smoke-manifest.json
+            ${{ runner.temp }}/chat-timeline-smoke/fetch-report.json
+            ${{ runner.temp }}/chat-timeline-smoke/ipa-audit.json
+            ${{ runner.temp }}/chat-timeline-smoke/native-commands.log
+            ${{ runner.temp }}/chat-timeline-smoke/simctl-help.txt
+            ${{ runner.temp }}/chat-timeline-smoke/crash-summary.json
+            ${{ runner.temp }}/chat-timeline-smoke/cleanup.json
+            ${{ runner.temp }}/chat-timeline-smoke/startup-02s.png
+            ${{ runner.temp }}/chat-timeline-smoke/startup-20s.png
+          if-no-files-found: warn
+          retention-days: 3
