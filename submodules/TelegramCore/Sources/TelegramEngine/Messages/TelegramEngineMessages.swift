@@ -167,6 +167,19 @@ public extension TelegramEngine {
             return _internal_searchMessageIdByTimestamp(account: self.account, peerId: peerId, threadId: threadId, timestamp: timestamp)
         }
 
+        /// Loads a small, read-only preview around a local calendar day's start. This does not
+        /// insert history, advance read state, or treat a failed request as an empty date.
+        public func previewMessageByTimestamp(peerId: EnginePeer.Id, timestamp: Int32, upperTimestamp: Int32) -> Signal<EngineMessage?, ChatTimelineMessageError> {
+            return _internal_chatTimelinePreview(account: self.account, peerId: peerId, timestamp: timestamp, upperTimestamp: upperTimestamp)
+            |> map { $0.flatMap(EngineMessage.init) }
+        }
+
+        /// Revalidates the exact message remotely, including deletion since a preview was cached.
+        public func fetchChatTimelineMessage(id: EngineMessage.Id) -> Signal<EngineMessage?, ChatTimelineMessageError> {
+            return _internal_chatTimelineMessages(account: self.account, peerId: id.peerId, subject: .message(id))
+            |> map { messages in messages.first(where: { $0.id == id }).flatMap(EngineMessage.init) }
+        }
+
         public func deleteMessages(transaction: Transaction, ids: [MessageId]) {
             return _internal_deleteMessages(transaction: transaction, mediaBox: self.account.postbox.mediaBox, ids: ids, deleteMedia: true, manualAddMessageThreadStatsDifference: nil)
         }

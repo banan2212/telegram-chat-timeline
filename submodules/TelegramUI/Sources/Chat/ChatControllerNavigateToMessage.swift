@@ -103,8 +103,21 @@ extension ChatControllerImpl {
         completion: (() -> Void)? = nil,
         customPresentProgress: ((ViewController, Any?) -> Void)? = nil,
         progress: Promise<Bool>? = nil,
-        statusSubject: ChatLoadingMessageSubject = .generic
+        statusSubject: ChatLoadingMessageSubject = .generic,
+        customNavigationDisposable: MetaDisposable? = nil,
+        isNavigationValid: (() -> Bool)? = nil
     ) {
+        // Timeline owns its asynchronous history lookup, so leaving a chat cancels only that
+        // request. A later normal navigation supersedes Timeline without sharing its disposable.
+        if customNavigationDisposable == nil {
+            self.cancelChatTimelineNavigation()
+        } else {
+            self.messageIndexDisposable.set(nil)
+        }
+        let messageIndexDisposable = customNavigationDisposable ?? self.messageIndexDisposable
+        guard isNavigationValid?() != false else {
+            return
+        }
         if !self.isNodeLoaded {
             completion?()
             return
@@ -292,7 +305,7 @@ extension ChatControllerImpl {
                 |> delay(progressValue == nil ? 0.05 : 0.0, queue: Queue.mainQueue())
                 let progressDisposable = MetaDisposable()
                 var progressStarted = false
-                self.messageIndexDisposable.set((signal
+                messageIndexDisposable.set((signal
                 |> afterDisposed {
                     Queue.mainQueue().async {
                         progressDisposable.dispose()
@@ -331,10 +344,10 @@ extension ChatControllerImpl {
                     }
                     completion?()
                 }))
-                cancelImpl = { [weak self] in
+                cancelImpl = { [weak self, weak messageIndexDisposable] in
                     if let strongSelf = self {
                         strongSelf.loadingMessage.set(.single(nil))
-                        strongSelf.messageIndexDisposable.set(nil)
+                        messageIndexDisposable?.set(nil)
                     }
                 }
                 
@@ -357,7 +370,7 @@ extension ChatControllerImpl {
             if let scrollFromIndex = scrollFromIndex {
                 if let messageId = messageLocation.messageId, let message = self.chatDisplayNode.historyNode.messageInCurrentHistoryView(messageId) {
                     self.loadingMessage.set(.single(nil))
-                    self.messageIndexDisposable.set(nil)
+                    messageIndexDisposable.set(nil)
                     
                     var delayCompletion = true
                     if self.chatDisplayNode.historyNode.isMessageVisible(id: messageId) {
@@ -487,13 +500,16 @@ extension ChatControllerImpl {
                     |> delay(0.05, queue: Queue.mainQueue())
                     let progressDisposable = MetaDisposable()
                     var progressStarted = false
-                    self.messageIndexDisposable.set((signal
+                    messageIndexDisposable.set((signal
                     |> afterDisposed {
                         Queue.mainQueue().async {
                             progressDisposable.dispose()
                         }
                     }
                     |> deliverOnMainQueue).startStrict(next: { [weak self] index in
+                        guard isNavigationValid?() != false else {
+                            return
+                        }
                         if let strongSelf = self, let index = index.0 {
                             strongSelf.chatDisplayNode.historyNode.scrollToMessage(from: scrollFromIndex, to: index, animated: animated, quote: quote, scrollPosition: scrollPosition, setupReply: setupReply)
                         } else if index.1 {
@@ -505,15 +521,18 @@ extension ChatControllerImpl {
                             strongSelf.controllerInteraction?.displayUndo(.info(title: nil, text: strongSelf.presentationData.strings.Conversation_MessageDoesntExist, timeout: nil, customUndoText: nil))
                         }
                     }, completed: { [weak self] in
+                        guard isNavigationValid?() != false else {
+                            return
+                        }
                         if let strongSelf = self {
                             strongSelf.loadingMessage.set(.single(nil))
                         }
                         completion?()
                     }))
-                    cancelImpl = { [weak self] in
+                    cancelImpl = { [weak self, weak messageIndexDisposable] in
                         if let strongSelf = self {
                             strongSelf.loadingMessage.set(.single(nil))
-                            strongSelf.messageIndexDisposable.set(nil)
+                            messageIndexDisposable?.set(nil)
                         }
                     }
                 }
@@ -563,7 +582,7 @@ extension ChatControllerImpl {
                 }
                 |> take(1)
                 
-                self.messageIndexDisposable.set((signal |> deliverOnMainQueue).startStrict(next: { [weak self] index in
+                messageIndexDisposable.set((signal |> deliverOnMainQueue).startStrict(next: { [weak self] index in
                     if let strongSelf = self {
                         if let index = index {
                             strongSelf.chatDisplayNode.historyNode.scrollToMessage(from: fromIndex, to: index, animated: animated, scrollPosition: scrollPosition)

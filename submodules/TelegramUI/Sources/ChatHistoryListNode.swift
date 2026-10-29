@@ -5064,6 +5064,35 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
         return currentMessage.flatMap(EngineMessage.init)
     }
     
+    /// Captures a concrete visible anchor, including the newest item and albums. The normal
+    /// persisted scroll state intentionally omits the newest item; a Timeline return must keep
+    /// it so messages arriving during exploration cannot move the saved reading position.
+    func chatTimelineScrollState() -> ChatInterfaceHistoryScrollState? {
+        guard let historyView = self.historyView, let visibleRange = self.listView.displayedItemRange.visibleRange else {
+            return nil
+        }
+        for (index, entry) in historyView.filteredEntries.reversed().enumerated() {
+            guard index >= visibleRange.firstIndex && index <= visibleRange.lastIndex else {
+                continue
+            }
+            let message: Message?
+            switch entry {
+            case let .MessageEntry(value, _, _, _, _, _):
+                message = value
+            case let .MessageGroupEntry(_, values, _):
+                message = values.first?.0
+            default:
+                message = nil
+            }
+            guard let message, message.id.namespace == Namespaces.Message.Cloud, message.adAttribute == nil,
+                  let offset = self.itemNodeRelativeOffset(containingMessageId: message.id) else {
+                continue
+            }
+            return ChatInterfaceHistoryScrollState(messageIndex: message.index, relativeOffset: Double(offset))
+        }
+        return nil
+    }
+
     func immediateScrollState() -> ChatInterfaceHistoryScrollState? {
         var currentMessage: Message?
         if let historyView = self.historyView {

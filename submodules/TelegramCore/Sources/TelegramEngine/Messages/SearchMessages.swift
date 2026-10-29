@@ -873,6 +873,149 @@ func fetchRemoteMessage(accountPeerId: PeerId, postbox: Postbox, source: FetchMe
     }
 }
 
+public enum ChatTimelineMessageError {
+    case unavailable
+    case generic
+}
+
+enum ChatTimelineMessageSubject {
+    case date(Int32)
+    case message(MessageId)
+}
+
+/// A remote read that renders messages without adding them to the live history view. Unlike
+/// the legacy calendar lookup, errors remain errors, and deleted messages never fall back to cache.
+func _internal_chatTimelineMessages(account: Account, peerId: PeerId, subject: ChatTimelineMessageSubject) -> Signal<[Message], ChatTimelineMessageError> {
+    return account.postbox.transaction { transaction -> Peer? in
+        return transaction.getPeer(peerId)
+    }
+    |> castError(ChatTimelineMessageError.self)
+    |> mapToSignal { peer -> Signal<[Message], ChatTimelineMessageError> in
+        guard let peer, let inputPeer = apiInputPeer(peer), !peer.isForumOrMonoForum,
+              peerId.namespace == Namespaces.Peer.CloudUser || peerId.namespace == Namespaces.Peer.CloudGroup || peerId.namespace == Namespaces.Peer.CloudChannel else {
+            return .fail(.unavailable)
+        }
+
+        let request: Signal<Api.messages.Messages, MTRpcError>
+        switch subject {
+        case let .date(timestamp):
+            // The two records straddle the insertion point. No day/month history is scanned.
+            request = account.network.request(Api.functions.messages.getHistory(peer: inputPeer, offsetId: 0, offsetDate: timestamp, addOffset: -1, limit: 2, maxId: 0, minId: 0, hash: 0), automaticFloodWait: false)
+        case let .message(id):
+            guard id.namespace == Namespaces.Message.Cloud else {
+                return .fail(.unavailable)
+            }
+            if peerId.namespace == Namespaces.Peer.CloudChannel {
+                guard let channel = apiInputChannel(peer) else {
+                    return .fail(.unavailable)
+                }
+                request = account.network.request(Api.functions.channels.getMessages(channel: channel, id: [.inputMessageID(.init(id: id.id))]), automaticFloodWait: false)
+            } else {
+                request = account.network.request(Api.functions.messages.getMessages(id: [.inputMessageID(.init(id: id.id))]), automaticFloodWait: false)
+            }
+        }
+
+        return request
+        |> mapError { error -> ChatTimelineMessageError in
+            switch error.errorDescription {
+            case "CHANNEL_PRIVATE", "CHANNEL_INVALID", "PEER_ID_INVALID", "CHAT_ID_INVALID":
+                return .unavailable
+            default:
+                return .generic
+            }
+        }
+        |> mapToSignal { result -> Signal<[Message], ChatTimelineMessageError> in
+            let messages: [Api.Message]
+            let chats: [Api.Chat]
+            let users: [Api.User]
+            switch result {
+            case let .messages(data):
+                messages = data.messages
+                chats = data.chats
+                users = data.users
+            case let .messagesSlice(data):
+                messages = data.messages
+                chats = data.chats
+                users = data.users
+            case let .channelMessages(data):
+                messages = data.messages
+                chats = data.chats
+                users = data.users
+            case .messagesNotModified:
+                return .single([])
+            }
+
+            return account.postbox.transaction { transaction -> [Message] in
+                var peers: [PeerId: Peer] = [peer.id: peer]
+                for user in users {
+                    if let user = TelegramUser.merge(transaction.getPeer(user.peerId) as? TelegramUser, rhs: user) {
+                        peers[user.id] = user
+                    }
+                }
+                for chat in chats {
+                    if let chat = mergeGroupOrChannel(lhs: transaction.getPeer(chat.peerId), rhs: chat) {
+                        peers[chat.id] = chat
+                    }
+                }
+                return messages.compactMap { apiMessage in
+                    guard let message = StoreMessage(apiMessage: apiMessage, accountPeerId: account.peerId, peerIsForum: false),
+                          let rendered = locallyRenderedMessage(message: message, peers: peers),
+                          rendered.id.peerId == peerId else {
+                        return nil
+                    }
+                    return rendered
+                }
+            }
+            |> castError(ChatTimelineMessageError.self)
+        }
+    }
+}
+
+func _internal_chatTimelinePreview(account: Account, peerId: PeerId, timestamp: Int32, upperTimestamp: Int32) -> Signal<Message?, ChatTimelineMessageError> {
+    return account.postbox.transaction { transaction -> PeerId? in
+        if let data = transaction.getPeerCachedData(peerId: peerId) as? CachedChannelData {
+            return data.migrationReference?.maxMessageId.peerId
+        }
+        return nil
+    }
+    |> castError(ChatTimelineMessageError.self)
+    |> mapToSignal { migratedPeerId -> Signal<Message?, ChatTimelineMessageError> in
+        var requests = [_internal_chatTimelineMessages(account: account, peerId: peerId, subject: .date(timestamp))]
+        if let migratedPeerId, migratedPeerId != peerId {
+            requests.append(_internal_chatTimelineMessages(account: account, peerId: migratedPeerId, subject: .date(timestamp))
+            |> `catch` { error -> Signal<[Message], ChatTimelineMessageError> in
+                // Losing access to the old basic group must not hide accessible channel history.
+                // A transport failure remains an error rather than a false claim about that history.
+                switch error {
+                case .unavailable:
+                    return .single([])
+                case .generic:
+                    return .fail(.generic)
+                }
+            })
+        }
+        return combineLatest(requests)
+        |> map { results -> Message? in
+            let candidates = results.flatMap { $0 }
+            // Prefer a real message on the selected day. Otherwise report the closest returned
+            // message with its actual date; never manufacture an "empty day" from unloaded data.
+            return candidates.min(by: { lhs, rhs in
+                let lhsInDay = lhs.timestamp >= timestamp && lhs.timestamp < upperTimestamp
+                let rhsInDay = rhs.timestamp >= timestamp && rhs.timestamp < upperTimestamp
+                if lhsInDay != rhsInDay {
+                    return lhsInDay
+                }
+                let lhsDistance = abs(Int64(lhs.timestamp) - Int64(timestamp))
+                let rhsDistance = abs(Int64(rhs.timestamp) - Int64(timestamp))
+                if lhsDistance != rhsDistance {
+                    return lhsDistance < rhsDistance
+                }
+                return lhs.index < rhs.index
+            })
+        }
+    }
+}
+
 func _internal_searchMessageIdByTimestamp(account: Account, peerId: PeerId, threadId: Int64?, timestamp: Int32) -> Signal<MessageId?, NoError> {
     return account.postbox.transaction { transaction -> Signal<MessageId?, NoError> in
         if peerId.namespace == Namespaces.Peer.SecretChat {

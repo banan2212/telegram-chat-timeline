@@ -281,6 +281,14 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     let navigationActionDisposable = MetaDisposable()
     let messageIndexDisposable = MetaDisposable()
+    let chatTimelineNavigationDisposable = MetaDisposable()
+    let chatTimelineHistoryNavigationDisposable = MetaDisposable()
+    var chatTimelineNavigationGeneration: Int = 0
+    var chatTimelineHistoryNavigationActive = false
+    var chatTimelineChatVisible = false
+    var chatTimelineReturnLocation: ChatTimelineReturnLocation?
+    weak var chatTimelineController: ChatTimelineController?
+    weak var chatTimelineReturnNotice: UndoOverlayController?
     var networkStateDisposable: Disposable?
 
     let wallpaperReady = Promise<Bool>()
@@ -3870,6 +3878,9 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
             guard let strongSelf = self else {
                 return
             }
+            if strongSelf.openChatTimeline(timestamp: timestamp) {
+                return
+            }
             switch strongSelf.chatLocation {
             case let .peer(peerId):
                 if alreadyThere {
@@ -7093,6 +7104,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
 
         self.historyStateDisposable?.dispose()
         self.messageIndexDisposable.dispose()
+        self.chatTimelineNavigationDisposable.dispose()
+        self.chatTimelineHistoryNavigationDisposable.dispose()
         self.navigationActionDisposable.dispose()
         self.galleryHiddenMesageAndMediaDisposable.dispose()
         self.temporaryHiddenGalleryMediaDisposable.dispose()
@@ -7697,6 +7710,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+
+        self.chatTimelineChatVisible = true
 
         self.walletTransferAnimationsVisible = true
         self.chatDisplayNode.historyNode.forEachVisibleMessageItemNode { itemNode in
@@ -8315,6 +8330,9 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     override public func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+
+        self.chatTimelineChatVisible = false
+        self.dismissChatTimeline()
 
         self.walletTransferAnimationsVisible = false
         
@@ -11237,6 +11255,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     var currentChatSwitchDirection: ChatControllerAnimateInnerChatSwitchDirection?
     
     func updateChatLocationToOther(chatLocation: ChatLocation) {
+        self.dismissChatTimeline(clearReturnLocation: true)
         self.saveInterfaceState()
         self.chatDisplayNode.dismissTextInput()
         
@@ -11268,6 +11287,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
             return
         }
         
+        self.dismissChatTimeline(clearReturnLocation: true)
         self.saveInterfaceState()
         
         self.chatDisplayNode.dismissTextInput()
@@ -11349,6 +11369,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                 completion?()
                 return
             }
+
+            self.dismissChatTimeline(clearReturnLocation: true)
             
             var clearInputState = false
             if transferInputState {
