@@ -1,3 +1,13 @@
+# Chat Timeline for Telegram iOS
+
+An unofficial feature proposal for browsing chat history by date, previewing a real message before jumping, and returning to the previous reading position.
+
+**Development status:** implementation and verification are in progress. No successful native build, iPhone verification, or finished demo is claimed yet. See [Chat Timeline](docs/chat-timeline/README.md), [acceptance checks](docs/chat-timeline/acceptance.md), and the [build workflow](ci/chat-timeline/README.md).
+
+Based on TelegramMessenger/Telegram-iOS commit `fb0e62ba8a147f0821da6aa63c09da7d79a10111`. Existing upstream licenses and notices apply. The feature is independent of Telegram and has not been accepted or endorsed by Telegram.
+
+---
+
 # Telegram iOS Source Code Compilation Guide
 
 We welcome all developers to use our API and source code to create applications on our platform.
