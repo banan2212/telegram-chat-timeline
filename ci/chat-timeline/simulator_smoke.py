@@ -122,13 +122,15 @@ def selected_runtime(runtimes, device_types):
                  and item.get('identifier', '').startswith('com.apple.CoreSimulator.SimRuntime.iOS-')]
     require(installed, 'No installed available iOS simulator runtime')
     installed.sort(key=lambda item: (item['version'] == '27.1', inspect_ipa.version(item['version'])), reverse=True)
-    runtime = installed[0]
     known = {item['identifier']: item for item in device_types['devicetypes']}
-    supported = [known[item['identifier']] for item in runtime.get('supportedDeviceTypes', [])
-                 if item['identifier'] in known and item.get('productFamily') == 'iPhone']
-    require(supported, 'Runtime does not advertise any installed compatible iPhone device type')
-    device = next((item for item in supported if item['identifier'] == 'com.apple.CoreSimulator.SimDeviceType.iPhone-15'), supported[0])
-    return runtime, device
+    candidates = [(runtime, known[item['identifier']]) for runtime in installed
+                  for item in runtime.get('supportedDeviceTypes', [])
+                  if item['identifier'] in known and item.get('productFamily') == 'iPhone']
+    require(candidates, 'Runtimes do not advertise any installed compatible iPhone device type')
+    # Runtime 27.1 on this image advertises only iPhone Duo; 27.0 supports iPhone 15.
+    # Honor the requested phone when any installed runtime actually supports it.
+    return next((pair for pair in candidates if pair[1]['identifier'] ==
+                 'com.apple.CoreSimulator.SimDeviceType.iPhone-15'), candidates[0])
 
 
 def safe_for_ditto(ipa):
@@ -274,7 +276,8 @@ def run_smoke(output, run_id, source_sha):
               'runtime': {'identifier': runtime['identifier'], 'version': runtime['version'], 'build': runtime.get('buildversion')},
               'simulator_id': device_id, 'bundle_identifier': main_app['bundle_identifier'],
               'telegram_login_performed': False, 'feature_tested': False, 'iphone_tested': False,
-              'screenshots_visually_reviewed': False, 'screenshots': [], 'process_alive_after_20_seconds': False}
+              'screenshots_visually_reviewed': False, 'screenshot_display': 'primary',
+              'screenshots': [], 'process_alive_after_20_seconds': False}
     started = time.time()
     try:
         command(['xcrun', 'simctl', 'boot', device_id], timeout=45, output=output, label='boot')
@@ -292,7 +295,8 @@ def run_smoke(output, run_id, source_sha):
                 time.sleep(min(1.0, max(0.0, second - (time.monotonic() - observed))))
             check_process(pid, main_app['executable'])
             screenshot = output / f'startup-{second:02d}s.png'
-            command(['xcrun', 'simctl', 'io', device_id, 'screenshot', '--type=png', str(screenshot)], timeout=30, output=output, label='native screenshot')
+            command(['xcrun', 'simctl', 'io', device_id, 'screenshot', '--type=png', '--display=primary', str(screenshot)],
+                    timeout=30, output=output, label='native screenshot')
             with screenshot.open('rb') as stream:
                 header = stream.read(24)
             require(header[:8] == b'\x89PNG\r\n\x1a\n' and len(header) == 24, 'simctl did not produce a PNG')
