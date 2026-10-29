@@ -2,9 +2,23 @@
 
 An unofficial feature proposal for browsing chat history by date, previewing a real message before jumping, and returning to the previous reading position.
 
-**Development status:** implementation and verification are in progress. No successful native build, iPhone verification, or finished demo is claimed yet. See [Chat Timeline](docs/chat-timeline/README.md), [acceptance checks](docs/chat-timeline/acceptance.md), and the [build workflow](ci/chat-timeline/README.md).
+Intended flow: in an eligible cloud chat or channel, tap a date header to open Timeline. Select a year, month and day, inspect the actual preview date, then choose Jump. Cancel preserves the current view; Return restores the saved reading position. See [feature scope and current limitations](docs/chat-timeline/README.md).
 
-Based on TelegramMessenger/Telegram-iOS commit `fb0e62ba8a147f0821da6aa63c09da7d79a10111`. Existing upstream licenses and notices apply. The feature is independent of Telegram and has not been accepted or endorsed by Telegram.
+**Verification status:** the pinned upstream [baseline simulator build passed](https://github.com/banan2212/telegram-chat-timeline/actions/runs/40965516815). This is separate from feature compilation, startup and authenticated Timeline behavior. Physical iPhone verification and a finished demo are still pending. Required evidence is listed in the [acceptance checks](docs/chat-timeline/acceptance.md).
+
+Based on TelegramMessenger/Telegram-iOS commit [`fb0e62ba8a147f0821da6aa63c09da7d79a10111`](https://github.com/TelegramMessenger/Telegram-iOS/commit/fb0e62ba8a147f0821da6aa63c09da7d79a10111). For Chat Timeline builds, use **this fork** and a full feature commit SHA. The [CI build guide](ci/chat-timeline/README.md) explains exact-revision builds and artifact manifests, focused checks, simulator startup checks and their limits. Its public sample API configuration is for testing only, not end-user distribution. A device candidate requires personal signing; follow the [Windows/iPhone installation guide](docs/chat-timeline/device-installation.md).
+
+For a manual macOS build, prepare the selected feature checkout, then continue with [Setup Xcode](#setup-xcode), [Adjust Configuration](#adjust-configuration) and [Generate an Xcode project](#generate-an-xcode-project) below, using the pins in [`versions.json`](versions.json). Replace `FULL_FEATURE_COMMIT_SHA` with the revision you intend to test:
+
+```sh
+git clone https://github.com/banan2212/telegram-chat-timeline.git
+cd telegram-chat-timeline
+git checkout FULL_FEATURE_COMMIT_SHA
+git -c remote.origin.url=https://github.com/TelegramMessenger/Telegram-iOS.git submodule init
+git submodule update --init --recursive --jobs 2
+```
+
+The upstream guide below is preserved as reference; its original clone command selects upstream. Existing upstream licenses and notices apply. This feature has not been accepted or endorsed by Telegram.
 
 ---
 
