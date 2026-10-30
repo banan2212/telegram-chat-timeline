@@ -74,7 +74,10 @@ def entitlement_subset(data: dict, wildcard: bool = False) -> dict:
             result[key] = identifier(data[key], wildcard)
     for key in GROUP_KEYS:
         if key in data:
-            require(isinstance(data[key], list) and len(data[key]) <= 256, 'Invalid entitlement group list')
+            require(isinstance(data[key], list) and len(data[key]) <= 256,
+                    f'Invalid entitlement group list for {key} (contents omitted)')
+            require(wildcard or not any(isinstance(item, str) and '*' in item for item in data[key]),
+                    f'Wildcard not permitted in signed entitlement group {key} (values omitted)')
             result[key] = [identifier(item, wildcard) for item in data[key]]
     return result
 
@@ -108,9 +111,12 @@ def embedded_entitlements(blob: bytes) -> dict:
     magic, xml_blob = slots[5]
     require(magic == 0xFADE7171 and len(xml_blob) <= MAX_PLIST, 'Invalid XML entitlement slot')
     try:
-        result['xml'] = entitlement_subset(plistlib.loads(xml_blob[8:]))
+        parsed = plistlib.loads(xml_blob[8:])
     except (plistlib.InvalidFileException, ExpatError, ValueError, TypeError, OverflowError) as exc:
         raise InvalidArchive('Unreadable XML entitlements (contents omitted)') from exc
+    # A readable plist can still contain invalid signed entitlements. Keep those semantic
+    # failures distinct from XML corruption; provisioning-profile wildcards stay separate.
+    result['xml'] = entitlement_subset(parsed)
     result['xml_status'] = 'parsed_untrusted'
     checks, unknown = [], False
     for slot, (magic, directory) in slots.items():

@@ -27,8 +27,9 @@ def entitlements(bundle=BUNDLE):
             'keychain-access-groups': [TEAM + '.' + BUNDLE]}
 
 
-def signature(bundle=BUNDLE, wrong_hash=False):
-    xml = plistlib.dumps(entitlements(bundle))
+def signature(bundle=BUNDLE, wrong_hash=False, xml=None):
+    if xml is None:
+        xml = plistlib.dumps(entitlements(bundle))
     xml_blob = struct.pack('>II', 0xFADE7171, len(xml) + 8) + xml
     identity = bundle.encode() + b'\0'
     hash_offset = 44 + len(identity) + 5 * 32
@@ -41,8 +42,8 @@ def signature(bundle=BUNDLE, wrong_hash=False):
             directory + xml_blob)
 
 
-def binary(platform_id=2, minimum=26, bundle=BUNDLE, wrong_hash=False):
-    blob = signature(bundle, wrong_hash)
+def binary(platform_id=2, minimum=26, bundle=BUNDLE, wrong_hash=False, xml=None):
+    blob = signature(bundle, wrong_hash, xml)
     header = struct.pack('<8I', 0xFEEDFACF, audit.ARM64, 0, 2, 2, 40, 0, 0)
     build = struct.pack('<6I', 0x32, 24, platform_id, minimum << 16, 27 << 16, 0)
     code_signature = struct.pack('<4I', 0x1D, 16, 72, len(blob))
@@ -68,10 +69,10 @@ class InspectIPATests(unittest.TestCase):
         self.temporary.cleanup()
 
     def make(self, platform_id=2, minimum=26, plist_minimum='26.0', missing=False,
-             wrong_hash=False, extension=False, extra=None):
+             wrong_hash=False, extension=False, extra=None, xml=None):
         with zipfile.ZipFile(self.ipa, 'w', compression=zipfile.ZIP_STORED) as archive:
             self.add_bundle(archive, 'Payload/Main.app', BUNDLE, platform_id, minimum,
-                            plist_minimum, missing, wrong_hash)
+                            plist_minimum, missing, wrong_hash, xml)
             if extension:
                 self.add_bundle(archive, 'Payload/Main.app/PlugIns/Share.appex', BUNDLE + '.Share',
                                 2, 26, '26.0', False, False)
@@ -79,12 +80,12 @@ class InspectIPATests(unittest.TestCase):
                 archive.writestr(extra, b'do not extract')
         self.refresh_manifest()
 
-    def add_bundle(self, archive, path, bundle, platform_id, minimum, plist_minimum, missing, wrong_hash):
+    def add_bundle(self, archive, path, bundle, platform_id, minimum, plist_minimum, missing, wrong_hash, xml=None):
         info = {'CFBundleIdentifier': bundle, 'CFBundleExecutable': 'Executable',
                 'CFBundleSupportedPlatforms': ['iPhoneOS'], 'MinimumOSVersion': plist_minimum}
         archive.writestr(path + '/Info.plist', plistlib.dumps(info))
         if not missing:
-            archive.writestr(path + '/Executable', binary(platform_id, minimum, bundle, wrong_hash))
+            archive.writestr(path + '/Executable', binary(platform_id, minimum, bundle, wrong_hash, xml))
         archive.writestr(path + '/embedded.mobileprovision', profile(bundle))
 
     def refresh_manifest(self):
@@ -157,6 +158,45 @@ class InspectIPATests(unittest.TestCase):
     def test_entitlement_code_directory_digest_mismatch(self):
         self.make(wrong_hash=True)
         self.assertIn('xml_entitlements_code_directory_hash_mismatch', self.codes(self.inspect()))
+
+    def test_readable_signed_keychain_wildcard_is_rejected_as_semantic_error(self):
+        values = entitlements()
+        values['keychain-access-groups'] = ['PRIVATE-SIGNED-GROUP.*']
+        xml = plistlib.dumps(values)
+        self.assertEqual(plistlib.loads(xml), values)
+        self.make(xml=xml)
+        before = audit.sha256(self.ipa)
+        report = self.inspect()
+        self.assertEqual(report['result'], 'fail')
+        self.assertEqual(report['static_checks'], 'fail')
+        self.assertIn('bundle_inspection_failed', self.codes(report))
+        self.assertEqual(report['bundles'][0]['inspection_error'],
+                         'Wildcard not permitted in signed entitlement group keychain-access-groups (values omitted)')
+        rendered = json.dumps(report)
+        self.assertNotIn('Unreadable XML', rendered)
+        self.assertNotIn('PRIVATE-SIGNED-GROUP', rendered)
+        self.assertEqual(audit.profile_metadata(profile())['entitlements']['keychain-access-groups'],
+                         [TEAM + '.*'])
+        self.assertEqual(before, audit.sha256(self.ipa))
+        self.assertEqual(report['extracted_files'], 0)
+
+    def test_readable_signed_group_with_wrong_type_is_not_xml_corruption(self):
+        values = entitlements()
+        values['keychain-access-groups'] = 'PRIVATE-GROUP-VALUE'
+        self.make(xml=plistlib.dumps(values))
+        report = self.inspect()
+        self.assertEqual(report['result'], 'fail')
+        self.assertEqual(report['bundles'][0]['inspection_error'],
+                         'Invalid entitlement group list for keychain-access-groups (contents omitted)')
+        self.assertNotIn('PRIVATE-GROUP-VALUE', json.dumps(report))
+
+    def test_malformed_signed_xml_remains_a_parse_failure_without_contents(self):
+        self.make(xml=b'<?xml version="1.0"?><plist><dict><key>PRIVATE-XML</dict></plist>')
+        report = self.inspect()
+        self.assertEqual(report['result'], 'fail')
+        self.assertEqual(report['bundles'][0]['inspection_error'],
+                         'Unreadable XML entitlements (contents omitted)')
+        self.assertNotIn('PRIVATE-XML', json.dumps(report))
 
     def test_unsafe_path_is_rejected_without_extraction(self):
         self.make(extra='../../escape.txt')

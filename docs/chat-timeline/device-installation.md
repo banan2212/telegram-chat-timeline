@@ -2,7 +2,11 @@
 
 Research checked 2026-10-30 against source revision `774a31de368e01552f9e6478e8f086dc7c30357b`. Target: a separate test installation on iPhone 15 / iOS 26.
 
-**Status: a possible free signing workflow, not a verified installation recipe for this IPA.** A successful device build produces a candidate signed with an upstream public fixture. It is not directly installable. Personal signing, launch, Telegram login, and Chat Timeline behavior on this phone remain separate gates. See [acceptance.md](acceptance.md).
+**Current artifact status:** full [device](https://github.com/banan2212/telegram-chat-timeline/actions/runs/40977552237) and [simulator](https://github.com/banan2212/telegram-chat-timeline/actions/runs/40977729961) builds passed for native source `67cdc26e9e9cd4408f1d966a749352e4bbfdd0d6`. The device IPA uses the public signing fixture and a testing-only sample API configuration. It is not installable as-is.
+
+The actual device bundle ID is `ph.telegra.Telegraph`, which collides with the primary Telegram installation. A separate final application identity, compatible extension/App Group and keychain identities, and legitimate personal signing are mandatory. Static inspection still fails for five extensions with `Wildcard not permitted in signed entitlement group keychain-access-groups (values omitted)`; their XML parses, so this is a semantic entitlement failure, not XML corruption. No IPA or profile was modified to bypass it.
+
+The [simulator startup run](https://github.com/banan2212/telegram-chat-timeline/actions/runs/40984443420) produced genuine Telegram welcome-screen evidence, then hit a 90-second screenshot-command timeout; the full smoke check failed. This does not verify login, Chat Timeline or iPhone behavior. The Windows signing workflow below remains unverified for this candidate; personal signing, installation, launch, login and device acceptance are still required. See [acceptance.md](acceptance.md).
 
 ## What the free route allows
 
