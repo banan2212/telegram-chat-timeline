@@ -195,7 +195,7 @@ extension ChatControllerImpl {
                 TelegramEngine.EngineData.Item.Peer.Peer(id: messageId.peerId),
                 TelegramEngine.EngineData.Item.Messages.Message(id: messageId)
             )
-            |> deliverOnMainQueue).startStandalone(next: { [weak self] peer, message in
+            |> deliverOnMainQueue).startStandalone(next: { [weak self, messageIndexDisposable] peer, message in
                 guard let self, let peer = peer else {
                     return
                 }
