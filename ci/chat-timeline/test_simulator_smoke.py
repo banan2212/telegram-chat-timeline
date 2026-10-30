@@ -1,5 +1,6 @@
 """Regression checks for timeout evidence, not native simulator acceptance."""
 from pathlib import Path
+import base64
 import subprocess
 import tempfile
 import unittest
@@ -54,6 +55,43 @@ class InstallDiagnosticsChecks(unittest.TestCase):
                 self.assertEqual(install.call_count, 1)
                 self.assertEqual(install.call_args.kwargs['timeout'], 120)
                 diagnostics.assert_called_once()
+
+
+class ScreenshotChecks(unittest.TestCase):
+    PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==')
+
+    def test_capture_records_actual_command_window_separately_from_threshold(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / 'startup-02s.png').write_bytes(self.PNG)
+            report = {'capture_attempts': [], 'screenshots': []}
+            with patch.object(smoke, 'command', return_value='') as capture, \
+                    patch.object(smoke.time, 'monotonic', side_effect=[107.1, 147.9]):
+                smoke.capture_screenshot(output, 'device-id', 2, 100.0, report)
+            self.assertEqual(capture.call_args.kwargs['timeout'], 90)
+            self.assertNotIn('acceptable_codes', capture.call_args.kwargs)
+            attempt = report['capture_attempts'][0]
+            self.assertEqual(attempt['nominal_threshold_seconds'], 2)
+            self.assertEqual(attempt['command_started_seconds_after_launch'], 7.1)
+            self.assertEqual(attempt['command_ended_seconds_after_launch'], 47.9)
+            self.assertEqual(attempt['command_elapsed_seconds'], 40.8)
+            self.assertEqual(attempt['command_result'], 'pass')
+            self.assertEqual(len(report['screenshots']), 1)
+
+    def test_complete_png_does_not_override_failed_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / 'startup-02s.png').write_bytes(self.PNG)
+            report = {'capture_attempts': [], 'screenshots': []}
+            error = subprocess.TimeoutExpired(['simctl', 'io'], 90)
+            with patch.object(smoke, 'command', side_effect=error), \
+                    patch.object(smoke.time, 'monotonic', side_effect=[102.0, 192.5]):
+                with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                    smoke.capture_screenshot(output, 'device-id', 2, 100.0, report)
+            self.assertIs(raised.exception, error)
+            self.assertEqual(report['screenshots'], [])
+            self.assertEqual(report['capture_attempts'][0]['command_result'], 'fail')
+            self.assertEqual(report['capture_attempts'][0]['command_elapsed_seconds'], 90.5)
 
 
 if __name__ == '__main__':

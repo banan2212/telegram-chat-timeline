@@ -302,6 +302,30 @@ def install_app(output, device_id, app_path, bundle_identifier):
         raise
 
 
+def capture_screenshot(output, device_id, nominal_second, observed, report):
+    screenshot = output / f'startup-{nominal_second:02d}s.png'
+    started = time.monotonic()
+    attempt = {'file': screenshot.name, 'nominal_threshold_seconds': nominal_second,
+               'command_started_seconds_after_launch': round(started - observed, 3),
+               'timeout_seconds': 90, 'command_result': 'fail'}
+    report['capture_attempts'].append(attempt)
+    try:
+        command(['xcrun', 'simctl', 'io', device_id, 'screenshot', '--type=png', '--display=primary', str(screenshot)],
+                timeout=90, output=output, label='native screenshot')
+        attempt['command_result'] = 'pass'
+    finally:
+        ended = time.monotonic()
+        attempt['command_ended_seconds_after_launch'] = round(ended - observed, 3)
+        attempt['command_elapsed_seconds'] = round(ended - started, 3)
+    # A file left by a failed or timed-out command is evidence, never a passed capture.
+    with screenshot.open('rb') as stream:
+        header = stream.read(24)
+    require(header[:8] == b'\x89PNG\r\n\x1a\n' and len(header) == 24, 'simctl did not produce a PNG')
+    width, height = struct.unpack('>II', header[16:24])
+    report['screenshots'].append({'file': screenshot.name, 'capture_attempt_index': len(report['capture_attempts']) - 1,
+                                  'width': width, 'height': height, 'sha256': inspect_ipa.sha256(screenshot)})
+
+
 def run_smoke(output, run_id, source_sha):
     require(platform.system() == 'Darwin' and platform.machine() == 'arm64', 'Native Apple Silicon macOS required')
     require(os.environ.get('GITHUB_RUN_ID', '').isdigit(), 'This helper requires its GitHub job context')
@@ -349,7 +373,8 @@ def run_smoke(output, run_id, source_sha):
               'simulator_id': device_id, 'bundle_identifier': main_app['bundle_identifier'],
               'telegram_login_performed': False, 'feature_tested': False, 'iphone_tested': False,
               'screenshots_visually_reviewed': False, 'screenshot_display': 'primary',
-              'screenshots': [], 'process_alive_after_20_seconds': False}
+              'capture_timing_reference': 'Elapsed since launch returned its PID; command bounds are not the precise frame sample time.',
+              'capture_attempts': [], 'screenshots': [], 'process_alive_after_20_seconds': False}
     started = time.time()
     try:
         command(['xcrun', 'simctl', 'boot', device_id], timeout=45, output=output, label='boot')
@@ -366,15 +391,7 @@ def run_smoke(output, run_id, source_sha):
                 os.kill(pid, 0)
                 time.sleep(min(1.0, max(0.0, second - (time.monotonic() - observed))))
             check_process(pid, main_app['executable'])
-            screenshot = output / f'startup-{second:02d}s.png'
-            command(['xcrun', 'simctl', 'io', device_id, 'screenshot', '--type=png', '--display=primary', str(screenshot)],
-                    timeout=30, output=output, label='native screenshot')
-            with screenshot.open('rb') as stream:
-                header = stream.read(24)
-            require(header[:8] == b'\x89PNG\r\n\x1a\n' and len(header) == 24, 'simctl did not produce a PNG')
-            width, height = struct.unpack('>II', header[16:24])
-            report['screenshots'].append({'file': screenshot.name, 'seconds_after_launch': round(time.monotonic() - observed, 2),
-                                          'width': width, 'height': height, 'sha256': inspect_ipa.sha256(screenshot)})
+            capture_screenshot(output, device_id, second, observed, report)
             check_process(pid, main_app['executable'])
         report['process_alive_after_20_seconds'] = True
         report['observed_seconds'] = round(time.monotonic() - observed, 2)
