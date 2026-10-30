@@ -3,11 +3,27 @@ from pathlib import Path
 import base64
 import json
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import simulator_smoke as smoke
+
+
+def timeout_child(error):
+    def spawn(args, stdout, stderr):
+        stdout.write(error.stdout or b'')
+        stderr.write(error.stderr or b'')
+        stdout.flush()
+        stderr.flush()
+        child = Mock(pid=4321, returncode=None)
+        child.wait.side_effect = [error, -9]
+        child.poll.return_value = None
+        child.kill.side_effect = lambda: setattr(child, 'returncode', -9)
+        return child
+    return spawn
 
 
 class InstallDiagnosticsChecks(unittest.TestCase):
@@ -16,7 +32,7 @@ class InstallDiagnosticsChecks(unittest.TestCase):
                                           output=b'x' * 20000 + b'partial stdout\xff', stderr=b'partial stderr')
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
-            with patch.object(smoke.subprocess, 'run', side_effect=error), \
+            with patch.object(smoke.subprocess, 'Popen', side_effect=timeout_child(error)), \
                     patch.object(smoke.time, 'monotonic', side_effect=[10.0, 132.5]):
                 with self.assertRaises(subprocess.TimeoutExpired) as raised:
                     smoke.command(['simctl', 'install'], timeout=120, output=output, label='install')
@@ -31,14 +47,14 @@ class InstallDiagnosticsChecks(unittest.TestCase):
     def test_timeout_without_output_still_writes_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
-            with patch.object(smoke.subprocess, 'run', side_effect=subprocess.TimeoutExpired(['test'], 1)):
+            with patch.object(smoke.subprocess, 'Popen', side_effect=timeout_child(subprocess.TimeoutExpired(['test'], 1))):
                 with self.assertRaises(subprocess.TimeoutExpired):
                     smoke.command(['test'], timeout=1, output=output)
             self.assertIn('timeout=1s', (output / 'native-commands.log').read_text())
 
     def test_evidence_write_failure_does_not_replace_timeout(self):
         error = subprocess.TimeoutExpired(['simctl', 'install'], 120, output=b'partial')
-        with patch.object(smoke.subprocess, 'run', side_effect=error), \
+        with patch.object(smoke.subprocess, 'Popen', side_effect=timeout_child(error)), \
                 patch.object(smoke, 'command_evidence', side_effect=OSError('disk full')):
             with self.assertRaises(subprocess.TimeoutExpired) as raised:
                 smoke.command(['simctl', 'install'], timeout=120, output=Path('unused'))
@@ -56,6 +72,48 @@ class InstallDiagnosticsChecks(unittest.TestCase):
                 self.assertEqual(install.call_count, 1)
                 self.assertEqual(install.call_args.kwargs['timeout'], 120)
                 diagnostics.assert_called_once()
+
+
+class DirectChildChecks(unittest.TestCase):
+    def test_finished_child_does_not_wait_for_inherited_output_handles(self):
+        script = ("import subprocess,sys; "
+                  "subprocess.Popen([sys.executable,'-c','import time; time.sleep(3)'], close_fds=False); "
+                  "print('direct child completed', flush=True)")
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                started = time.monotonic()
+                value = smoke.command([sys.executable, '-c', script], timeout=2, output=output)
+                self.assertLess(time.monotonic() - started, 2.5,
+                                'command() waited for the descendant instead of the direct child')
+                self.assertEqual(value, 'direct child completed')
+                self.assertIn('direct_child_returncode=0', (output / 'native-commands.log').read_text())
+        finally:
+            # The intentionally inherited-handle descendant has a bounded self-exit.
+            time.sleep(3.1)
+
+    def test_live_direct_child_timeout_stays_failure_and_is_reaped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                smoke.command([sys.executable, '-c', "import time; print('started', flush=True); time.sleep(5)"],
+                              timeout=0.5, output=output)
+            log = (output / 'native-commands.log').read_text()
+            self.assertIn('started', log)
+            self.assertIn('direct_child_returncode_before_termination=None', log)
+            self.assertNotIn('direct_child_returncode_after_termination=None', log)
+
+    def test_nonzero_direct_exit_remains_failure(self):
+        with self.assertRaisesRegex(RuntimeError, 'failed with exit 7'):
+            smoke.command([sys.executable, '-c', 'import sys; sys.exit(7)'], timeout=2)
+
+    def test_json_return_is_complete_not_evidence_tail(self):
+        value = smoke.command([sys.executable, '-c', "import json; print(json.dumps({'payload':'x'*20000}))"], timeout=2)
+        self.assertEqual(len(json.loads(value)['payload']), 20000)
+
+    def test_oversized_stdout_is_explicit_failure(self):
+        with self.assertRaisesRegex(RuntimeError, '4 MiB full-output limit'):
+            smoke.command([sys.executable, '-c', "print('x'*(4*1024*1024+1))"], timeout=2)
 
 
 class LaunchDiagnosticsChecks(unittest.TestCase):

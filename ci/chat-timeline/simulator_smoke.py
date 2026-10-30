@@ -18,6 +18,7 @@ import shutil
 import stat
 import struct
 import subprocess
+import tempfile
 import time
 import zipfile
 
@@ -51,23 +52,66 @@ def command_evidence(output, label, status, started_at, elapsed, stdout, stderr)
     print(summary, flush=True)
 
 
+def file_output_snapshot(stream):
+    """Read a fixed-size snapshot, never wait for inherited writers to close."""
+    size = os.fstat(stream.fileno()).st_size
+
+    def read_at(offset, count):
+        if hasattr(os, 'pread'):
+            return os.pread(stream.fileno(), count, offset)
+        # Windows test/fetch host; native macOS uses pread without moving the shared offset.
+        stream.seek(offset)
+        return stream.read(count)
+
+    tail = read_at(max(0, size - 65536), min(size, 65536))
+    complete = read_at(0, size) if size <= 4 * 1024 ** 2 else None
+    return complete, tail, size
+
+
 def command(args, timeout=60, output=None, label=None, include_stderr=False, acceptable_codes=(0,)):
     started_at = dt.datetime.now(dt.timezone.utc).isoformat()
     started = time.monotonic()
-    try:
-        completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+    # Pipes make communicate() wait for EOF even after the direct child exits if a
+    # descendant inherited them. Regular files keep output capture separate from exit.
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        child = subprocess.Popen(args, stdout=stdout_file, stderr=stderr_file)
         try:
-            command_evidence(output, label or args[0], f'timeout={timeout}s', started_at,
-                             time.monotonic() - started, exc.stdout, exc.stderr)
-        except Exception:
-            # A full/unavailable evidence filesystem must not replace the timeout.
-            pass
-        raise
-    command_evidence(output, label or args[0], f'exit={completed.returncode}', started_at,
-                     time.monotonic() - started, completed.stdout, completed.stderr)
-    require(completed.returncode in acceptable_codes, f'{label or args[0]} failed with exit {completed.returncode}')
-    return (completed.stdout + ('\n' + completed.stderr if include_stderr else '')).strip()
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            before_termination = child.returncode
+            try:
+                before_termination = child.poll()
+                if before_termination is None:
+                    child.kill()
+                child.wait(timeout=5)  # Bounded reap; no communicate()/pipe EOF wait.
+            except Exception:
+                pass
+            try:
+                _, stdout_tail, _ = file_output_snapshot(stdout_file)
+                _, stderr_tail, _ = file_output_snapshot(stderr_file)
+                exc.stdout, exc.stderr = stdout_tail, stderr_tail
+                status = (f'timeout={timeout}s direct_child_pid={child.pid} '
+                          f'direct_child_returncode_before_termination={before_termination} '
+                          f'direct_child_returncode_after_termination={child.returncode}')
+                command_evidence(output, label or args[0], status, started_at,
+                                 time.monotonic() - started, stdout_tail, stderr_tail)
+            except Exception:
+                # Evidence/cleanup failure must not replace the original timeout.
+                pass
+            raise
+        stdout, stdout_tail, stdout_size = file_output_snapshot(stdout_file)
+        stderr, stderr_tail, stderr_size = file_output_snapshot(stderr_file)
+        status = (f'exit={child.returncode} direct_child_pid={child.pid} '
+                  f'direct_child_returncode={child.returncode} stdout_bytes={stdout_size} stderr_bytes={stderr_size}')
+        command_evidence(output, label or args[0], status, started_at,
+                         time.monotonic() - started, stdout_tail, stderr_tail)
+        require(child.returncode in acceptable_codes, f'{label or args[0]} failed with exit {child.returncode}')
+        require(stdout is not None and (not include_stderr or stderr is not None),
+                'Command output exceeds the 4 MiB full-output limit; refusing truncated return data')
+        value = stdout.decode('utf-8', errors='replace')
+        if include_stderr:
+            value += '\n' + stderr.decode('utf-8', errors='replace')
+        return value.strip()
 
 
 def github(endpoint):
