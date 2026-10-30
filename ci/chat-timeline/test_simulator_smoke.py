@@ -1,6 +1,7 @@
 """Regression checks for timeout evidence, not native simulator acceptance."""
 from pathlib import Path
 import base64
+import json
 import subprocess
 import tempfile
 import unittest
@@ -55,6 +56,44 @@ class InstallDiagnosticsChecks(unittest.TestCase):
                 self.assertEqual(install.call_count, 1)
                 self.assertEqual(install.call_args.kwargs['timeout'], 120)
                 diagnostics.assert_called_once()
+
+
+class LaunchDiagnosticsChecks(unittest.TestCase):
+    def test_launch_requires_original_command_success_without_retries(self):
+        for diagnostic_error in (None, OSError('diagnostics unavailable')):
+            with self.subTest(diagnostic_error=diagnostic_error), tempfile.TemporaryDirectory() as temporary:
+                error = subprocess.TimeoutExpired(['simctl', 'launch'], 120)
+                with patch.object(smoke, 'command', side_effect=error) as launch, \
+                        patch.object(smoke, 'launch_diagnostics', side_effect=diagnostic_error) as diagnostics:
+                    with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                        smoke.launch_app(Path(temporary), 'device-id', 'org.example.app', 'Telegram')
+                self.assertIs(raised.exception, error)
+                self.assertEqual(launch.call_count, 1)
+                self.assertEqual(launch.call_args.kwargs['timeout'], 120)
+                self.assertNotIn('acceptable_codes', launch.call_args.kwargs)
+                diagnostics.assert_called_once()
+
+    def test_launch_preserves_pid_output(self):
+        with patch.object(smoke, 'command', return_value='org.example.app: 123') as launch, \
+                patch.object(smoke, 'launch_diagnostics') as diagnostics:
+            self.assertEqual(smoke.launch_app(Path('unused'), 'device-id', 'org.example.app', 'Telegram'),
+                             'org.example.app: 123')
+        diagnostics.assert_not_called()
+
+    def test_launch_probes_record_correct_stage_even_when_probe_times_out(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with patch.object(smoke, 'command', side_effect=[subprocess.TimeoutExpired(['readback'], 15), '', '']) as probes:
+                smoke.launch_diagnostics(output, 'device-id', 'org.example.app', 'Telegram')
+            report = json.loads((output / 'launch-diagnostics.json').read_text())
+            self.assertEqual(report['scope'], 'launch_failure_diagnostics')
+            self.assertFalse(report['launch_retried'])
+            self.assertEqual([item['result'] for item in report['checks']], ['unknown', 'collected', 'collected'])
+            self.assertEqual([item.kwargs['timeout'] for item in probes.call_args_list], [15, 20, 20])
+            self.assertFalse((output / 'install-diagnostics.json').exists())
+            predicate = probes.call_args_list[1].args[0][-1]
+            for value in ('Telegram', 'runningboardd', 'FrontBoard'):
+                self.assertIn(value, predicate)
 
 
 class ScreenshotChecks(unittest.TestCase):

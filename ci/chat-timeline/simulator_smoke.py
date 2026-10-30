@@ -260,18 +260,20 @@ def crash_summary(output, executable, start, device_id):
     return result
 
 
-def install_diagnostics(output, device_id, bundle_identifier):
+def native_failure_diagnostics(output, device_id, bundle_identifier, stage, simulator_predicate):
     # Read-only, fresh unauthenticated simulator; no full sysdiagnose/log archive.
     # Every probe has its own cap. Unsupported or stalled diagnostics remain unknown.
-    report = {'scope': 'installation_failure_diagnostics', 'install_retried': False,
+    require(stage in ('install', 'launch'), 'Unexpected native diagnostic stage')
+    scope = 'installation' if stage == 'install' else 'launch'
+    report = {'scope': f'{scope}_failure_diagnostics', f'{stage}_retried': False,
               'disk_free_bytes': shutil.disk_usage(output).free, 'checks': []}
     if hasattr(os, 'getloadavg'):
         report['host_load_average'] = list(os.getloadavg())
     probes = [
         ('app container readback', ['xcrun', 'simctl', 'get_app_container', device_id, bundle_identifier, 'app'], 15),
-        ('simulator installation log', ['xcrun', 'simctl', 'spawn', device_id, 'log', 'show',
+        (f'simulator {scope} log', ['xcrun', 'simctl', 'spawn', device_id, 'log', 'show',
             '--style', 'compact', '--last', '5m', '--info', '--predicate',
-            'process == "installd" OR process == "installcoordinationd" OR subsystem CONTAINS[c] "MobileInstallation"'], 20),
+            simulator_predicate], 20),
         ('host CoreSimulator log', ['/usr/bin/log', 'show', '--style', 'compact', '--last', '5m',
             '--info', '--predicate', 'process == "CoreSimulatorService" OR subsystem BEGINSWITH "com.apple.CoreSimulator"'], 20),
     ]
@@ -286,7 +288,18 @@ def install_diagnostics(output, device_id, bundle_identifier):
         except Exception as exc:
             item['failure'] = f'{type(exc).__name__}: {exc}'[:1000]
         report['checks'].append(item)
-    save(output / 'install-diagnostics.json', report)
+    save(output / f'{stage}-diagnostics.json', report)
+
+
+def install_diagnostics(output, device_id, bundle_identifier):
+    native_failure_diagnostics(output, device_id, bundle_identifier, 'install',
+        'process == "installd" OR process == "installcoordinationd" OR subsystem CONTAINS[c] "MobileInstallation"')
+
+
+def launch_diagnostics(output, device_id, bundle_identifier, executable):
+    native_failure_diagnostics(output, device_id, bundle_identifier, 'launch',
+        f'process == {json.dumps(executable)} OR process == "runningboardd" OR process == "SpringBoard" '
+        'OR subsystem CONTAINS[c] "RunningBoard" OR subsystem CONTAINS[c] "FrontBoard"')
 
 
 def install_app(output, device_id, app_path, bundle_identifier):
@@ -299,6 +312,22 @@ def install_app(output, device_id, app_path, bundle_identifier):
         except Exception as exc:
             # Diagnostics must never replace the original install failure.
             print(f'Installation diagnostics unavailable: {type(exc).__name__}: {exc}', flush=True)
+        raise
+
+
+def launch_app(output, device_id, bundle_identifier, executable):
+    try:
+        return command(['xcrun', 'simctl', 'launch', device_id, bundle_identifier],
+                       timeout=120, output=output, label='launch')
+    except Exception:
+        try:
+            launch_diagnostics(output, device_id, bundle_identifier, executable)
+        except Exception as exc:
+            # Even diagnostic logging failure must preserve the original launch error.
+            try:
+                print(f'Launch diagnostics unavailable: {type(exc).__name__}: {exc}', flush=True)
+            except Exception:
+                pass
         raise
 
 
@@ -380,7 +409,7 @@ def run_smoke(output, run_id, source_sha):
         command(['xcrun', 'simctl', 'boot', device_id], timeout=45, output=output, label='boot')
         command(['xcrun', 'simctl', 'bootstatus', device_id, '-b'], timeout=180, output=output, label='bootstatus')
         install_app(output, device_id, app_path, main_app['bundle_identifier'])
-        launched = command(['xcrun', 'simctl', 'launch', device_id, main_app['bundle_identifier']], timeout=45, output=output, label='launch')
+        launched = launch_app(output, device_id, main_app['bundle_identifier'], main_app['executable'])
         match = re.search(re.escape(main_app['bundle_identifier']) + r':\s*(\d+)\s*$', launched)
         require(match, 'simctl launch did not return the application PID')
         pid = int(match.group(1))

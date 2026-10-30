@@ -84,6 +84,7 @@ jobs:
             ${{ runner.temp }}/chat-timeline-smoke/ipa-audit.json
             ${{ runner.temp }}/chat-timeline-smoke/native-commands.log
             ${{ runner.temp }}/chat-timeline-smoke/install-diagnostics.json
+            ${{ runner.temp }}/chat-timeline-smoke/launch-diagnostics.json
             ${{ runner.temp }}/chat-timeline-smoke/simctl-help.txt
             ${{ runner.temp }}/chat-timeline-smoke/crash-summary.json
             ${{ runner.temp }}/chat-timeline-smoke/cleanup.json
