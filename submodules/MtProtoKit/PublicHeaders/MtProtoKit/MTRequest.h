@@ -6,6 +6,12 @@
 @class MTRequestErrorContext;
 @class MTRpcError;
 
+/// Payload-free observations of this request only. No challenge data is exposed.
+typedef NS_ENUM(NSInteger, MTRequestDiagnosticEvent) {
+    MTRequestDiagnosticEventApnsChallenge,
+    MTRequestDiagnosticEventRecaptchaChallenge
+};
+
 @interface MTRequestResponseInfo : NSObject
 
 @property (nonatomic, readonly) int32_t networkType;
@@ -42,6 +48,8 @@
 @property (nonatomic, copy) void (^completed)(id result, MTRequestResponseInfo *info, MTRpcError *error);
 @property (nonatomic, copy) void (^progressUpdated)(float progress, NSUInteger packetLength);
 @property (nonatomic, copy) void (^acknowledgementReceived)();
+/// Optional observer on the request service queue; must not block or reenter the service.
+@property (nonatomic, copy, nullable) void (^diagnosticEvent)(MTRequestDiagnosticEvent event);
 
 @property (nonatomic, copy) bool (^shouldContinueExecutionWithErrorContext)(MTRequestErrorContext *errorContext);
 @property (nonatomic, copy) bool (^shouldDependOnRequest)(MTRequest *anotherRequest);

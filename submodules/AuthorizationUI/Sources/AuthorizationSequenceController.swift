@@ -48,6 +48,12 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
     private var stateDisposable: Disposable?
     private let actionDisposable = MetaDisposable()
     private var applicationStateDisposable: Disposable?
+
+    // Absent in normal builds. The dedicated diagnostic signing input explicitly opts in.
+    private let authorizationDiagnosticsEnabled: Bool
+    private var authorizationDiagnosticsArmed: Bool
+    private var authorizationDiagnostics: AuthorizationCodeDiagnostics?
+    private var authorizationDiagnosticsGeneration: UInt64 = 0
     
     private var didPlayPresentationAnimation = false
     
@@ -72,6 +78,9 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
         self.presentationData = presentationData
         self.openUrl = openUrl
         self.authorizationCompleted = authorizationCompleted
+        let diagnosticsEnabled = Bundle.main.object(forInfoDictionaryKey: "ChatTimelineAuthDiagnosticsEnabled") as? Bool == true
+        self.authorizationDiagnosticsEnabled = diagnosticsEnabled
+        self.authorizationDiagnosticsArmed = diagnosticsEnabled
         
         let navigationStatusBar: NavigationStatusBarStyle
         switch presentationData.theme.rootController.statusBarStyle {
@@ -118,6 +127,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
     }
     
     deinit {
+        self.authorizationDiagnostics?.cancel()
         self.stateDisposable?.dispose()
         self.actionDisposable.dispose()
         self.applicationStateDisposable?.dispose()
@@ -126,6 +136,28 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
     override public func loadView() {
         super.loadView()
         self.view.backgroundColor = self.presentationData.theme.list.plainBackgroundColor
+    }
+
+    override public func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        self.cancelAuthorizationDiagnostics(disarm: true)
+    }
+
+    private func cancelAuthorizationDiagnostics(disarm: Bool = false) {
+        self.authorizationDiagnosticsGeneration &+= 1
+        self.authorizationDiagnostics?.cancel()
+        self.authorizationDiagnostics = nil
+        if disarm { self.authorizationDiagnosticsArmed = false }
+    }
+
+    private func takeAuthorizationDiagnosticSummary(_ diagnostics: AuthorizationCodeDiagnostics?, generation: UInt64) -> String? {
+        guard generation == self.authorizationDiagnosticsGeneration, let diagnostics = diagnostics, self.authorizationDiagnostics === diagnostics else {
+            return nil
+        }
+        let summary = diagnostics.snapshot?.summary
+        self.authorizationDiagnostics = nil
+        diagnostics.cancel()
+        return summary
     }
     
     private func splashController() -> AuthorizationSequenceSplashController {
@@ -176,6 +208,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                 guard let strongSelf = self else {
                     return
                 }
+                strongSelf.cancelAuthorizationDiagnostics(disarm: true)
                 if !strongSelf.otherAccountPhoneNumbers.1.isEmpty {
                     let _ = (strongSelf.sharedContext.accountManager.transaction { transaction -> Void in
                         transaction.removeAuth()
@@ -198,6 +231,16 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                 guard let self else {
                     return
                 }
+                self.cancelAuthorizationDiagnostics()
+                let diagnosticGeneration = self.authorizationDiagnosticsGeneration
+                let diagnostics: AuthorizationCodeDiagnostics?
+                if self.authorizationDiagnosticsEnabled && self.authorizationDiagnosticsArmed {
+                    self.authorizationDiagnosticsArmed = false
+                    diagnostics = AuthorizationCodeDiagnostics()
+                    self.authorizationDiagnostics = diagnostics
+                } else {
+                    diagnostics = nil
+                }
                 controller?.inProgress = true
                 
                 let disableAuthTokens = self.sharedContext.immediateExperimentalUISettings.disableReloginTokens
@@ -207,7 +250,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                 let _ = (authorizationPushConfiguration
                 |> deliverOnMainQueue).startStandalone(next: { [weak self] authorizationPushConfiguration in
                     if let strongSelf = self {
-                        strongSelf.actionDisposable.set((sendAuthorizationCode(accountManager: strongSelf.sharedContext.accountManager, account: strongSelf.account, phoneNumber: number, apiId: strongSelf.apiId, apiHash: strongSelf.apiHash, pushNotificationConfiguration: authorizationPushConfiguration, firebaseSecretStream: strongSelf.sharedContext.firebaseSecretStream, syncContacts: syncContacts, disableAuthTokens: disableAuthTokens, forcedPasswordSetupNotice: { value in
+                        strongSelf.actionDisposable.set((sendAuthorizationCode(accountManager: strongSelf.sharedContext.accountManager, account: strongSelf.account, phoneNumber: number, apiId: strongSelf.apiId, apiHash: strongSelf.apiHash, pushNotificationConfiguration: authorizationPushConfiguration, firebaseSecretStream: strongSelf.sharedContext.firebaseSecretStream, syncContacts: syncContacts, disableAuthTokens: disableAuthTokens, diagnostics: diagnostics, forcedPasswordSetupNotice: { value in
                             guard let entry = EngineCodableEntry(ApplicationSpecificCounterNotice(value: value)) else {
                                 return nil
                             }
@@ -222,12 +265,15 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                                 case .loggedIn:
                                     break
                                 }
+                                if let summary = strongSelf.takeAuthorizationDiagnosticSummary(diagnostics, generation: diagnosticGeneration) {
+                                    strongSelf.presentOverlay(controller: textAlertController(sharedContext: strongSelf.sharedContext, title: "Authorization diagnostics", text: summary, actions: [TextAlertAction(type: .defaultAction, title: strongSelf.presentationData.strings.Common_OK, action: {})]), inGlobal: true, blockInteraction: true)
+                                }
                             }
                         }, error: { error in
                             if let strongSelf = self, let controller = controller {
                                 controller.inProgress = false
                                 
-                                let text: String
+                                var text: String
                                 var actions: [TextAlertAction] = []
                                 switch error {
                                     case .limitExceeded:
@@ -306,6 +352,15 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                                             }
                                             controller.present(strongSelf.sharedContext.makeProxySettingsController(sharedContext: strongSelf.sharedContext, account: strongSelf.account), in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
                                         }))
+                                        if strongSelf.authorizationDiagnosticsEnabled {
+                                            actions.append(TextAlertAction(type: .genericAction, title: "Diagnose next attempt", action: { [weak self] in
+                                                // Arming does not send or retry an authorization request.
+                                                self?.authorizationDiagnosticsArmed = true
+                                            }))
+                                        }
+                                }
+                                if let summary = strongSelf.takeAuthorizationDiagnosticSummary(diagnostics, generation: diagnosticGeneration) {
+                                    text += "\n\n" + summary
                                 }
                                 (controller.navigationController as? NavigationController)?.presentOverlay(controller: textAlertController(sharedContext: strongSelf.sharedContext, title: nil, text: text, actions: actions), inGlobal: true, blockInteraction: true)
                                 
@@ -319,6 +374,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                 guard let self else {
                     return
                 }
+                self.cancelAuthorizationDiagnostics(disarm: true)
                 
                 self.actionDisposable.set((authorizeWithPasskey(
                     accountManager: self.sharedContext.accountManager,

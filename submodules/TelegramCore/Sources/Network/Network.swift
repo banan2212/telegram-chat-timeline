@@ -994,6 +994,12 @@ public final class Network: NSObject {
     public var engineKind: NetworkEngineKind {
         return self.engine.kind
     }
+
+    /// Request challenge hooks currently exist only in the fixed MtProtoKit engine.
+    /// A live-switching network is conservative: part of an attempt could run on Rust.
+    public var supportsRequestDiagnostics: Bool {
+        return self.switchingEngine == nil && self.engineKind == .mtProtoKit
+    }
     
     fileprivate init(queue: Queue, datacenterId: Int, context: MTContext, engine: NetworkEngine, switchingEngine: SwitchingNetworkEngine?, engineFactory: NetworkEngineFactory?, rustEngineDisabled: Bool, rustEngineWaitsForWebProxy: Bool, mainSession: NetworkEngineSession, mainSessionDelegate: NetworkMainSessionDelegate, telemetry: NetworkTelemetry?, _connectionStatus: Promise<ConnectionStatus>, basePath: String, appDataDisposable: Disposable, encryptionProvider: EncryptionProvider, useRequestTimeoutTimers: Bool, useBetaFeatures: Bool, useExperimentalFeatures: Bool, baseTcpConnectionInterfaceFactory: ((MTTcpConnectionInterfaceDelegate, DispatchQueue) -> MTTcpConnectionInterface)?, isAppExtension: Bool, initialWebProxyActive: Bool) {
         self.encryptionProvider = encryptionProvider
@@ -1417,8 +1423,14 @@ public final class Network: NSObject {
         }
     }
     
-    func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
+    func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, diagnosticEvent: ((NetworkRequestDiagnosticEvent) -> Void)? = nil, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
         let requestService = self.requestService
+        let requestDiagnosticEvent: ((NetworkRequestDiagnosticEvent) -> Void)?
+        if let diagnosticEvent = diagnosticEvent, self.supportsRequestDiagnostics {
+            requestDiagnosticEvent = diagnosticEvent
+        } else {
+            requestDiagnosticEvent = nil
+        }
         return Signal { [requestService] subscriber in
             let request = NetworkEngineRequest(
                 payload: data.1.makeData(),
@@ -1435,6 +1447,7 @@ public final class Network: NSObject {
                 dependsOn: networkRequestDependency(tag: tag),
                 acknowledged: nil,
                 progress: nil,
+                diagnosticEvent: requestDiagnosticEvent,
                 completed: { result in
                     switch result {
                     case let .success(response):

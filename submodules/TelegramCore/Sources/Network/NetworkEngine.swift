@@ -8,6 +8,13 @@ public enum NetworkEngineKind: String, Codable, Equatable {
     case rust
 }
 
+/// Fixed observations of one opted-in request. Never contains RPC or challenge data.
+public enum NetworkRequestDiagnosticEvent: Equatable {
+    case apnsChallenge
+    case recaptchaChallenge
+    case serverErrorRetry
+}
+
 /// Per-request transport options.
 public struct NetworkEngineRequestOptions: Equatable {
     /// When a request with `expectedResponseSize >= 512 KB` is cancelled while it is in flight,
@@ -96,6 +103,9 @@ public final class NetworkEngineRequest {
     public let acknowledged: (() -> Void)?
     /// When set, called with the receive progress of the response packet and the packet length.
     public let progress: ((Float, Int) -> Void)?
+    /// Called on the engine's serial queue. Observers must be short, thread-safe and payload-free.
+    public let diagnosticEvent: ((NetworkRequestDiagnosticEvent) -> Void)?
+    private var diagnosticInternalServerErrorCount: Int = 0
     private let shouldContinueAfterErrorImpl: (NetworkEngineErrorContext) -> Bool
     private let completedImpl: (Result<NetworkEngineResponse, NetworkEngineRequestFailure>) -> Void
     /// Set by `NetworkTelemetry` before the request reaches an engine, and only read afterwards.
@@ -113,6 +123,7 @@ public final class NetworkEngineRequest {
         dependsOn: ((WrappedRequestMetadata) -> Bool)?,
         acknowledged: (() -> Void)?,
         progress: ((Float, Int) -> Void)?,
+        diagnosticEvent: ((NetworkRequestDiagnosticEvent) -> Void)? = nil,
         completed: @escaping (Result<NetworkEngineResponse, NetworkEngineRequestFailure>) -> Void
     ) {
         self.payload = payload
@@ -124,6 +135,7 @@ public final class NetworkEngineRequest {
         self.dependsOn = dependsOn
         self.acknowledged = acknowledged
         self.progress = progress
+        self.diagnosticEvent = diagnosticEvent
         self.completedImpl = completed
     }
     
@@ -152,8 +164,15 @@ public final class NetworkEngineRequest {
     
     /// Asked on `FLOOD_WAIT_X`, `FLOOD_PREMIUM_WAIT_X` and `500`/`-500` errors. `true` retries the
     /// request after the wait (2 seconds for server errors), `false` completes it with the error.
-    public func shouldContinueAfterError(_ context: NetworkEngineErrorContext) -> Bool {
+    public func shouldContinueAfterError(_ context: NetworkEngineErrorContext, reportDiagnostics: Bool = true) -> Bool {
         let result = self.shouldContinueAfterErrorImpl(context)
+        if reportDiagnostics, let diagnosticEvent = self.diagnosticEvent {
+            let previousCount = self.diagnosticInternalServerErrorCount
+            self.diagnosticInternalServerErrorCount = context.internalServerErrorCount
+            if result && context.internalServerErrorCount > previousCount {
+                diagnosticEvent(.serverErrorRetry)
+            }
+        }
         if let telemetry = self.telemetry {
             telemetry.errorHandled(request: self, context: context, retried: result)
         }

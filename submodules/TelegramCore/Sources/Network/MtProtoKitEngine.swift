@@ -386,7 +386,7 @@ private final class MtProtoKitRequestService: NetworkEngineRequestService {
                 floodWaitSeconds: Int(errorContext?.floodWaitSeconds ?? 0),
                 floodWaitErrorText: errorContext?.floodWaitErrorText,
                 internalServerErrorCount: Int(errorContext?.internalServerErrorCount ?? 0) + 1
-            ))
+            ), reportDiagnostics: false)
         })
         switch decision {
         case let .move(delay):
@@ -422,6 +422,19 @@ private final class MtProtoKitRequestService: NetworkEngineRequestService {
         mtRequest.dependsOnPasswordEntry = false
         mtRequest.needsTimeoutTimer = request.options.needsTimeoutTimer
         mtRequest.expectedResponseSize = request.options.expectedResponseSize
+
+        if let diagnosticEvent = request.diagnosticEvent {
+            mtRequest.diagnosticEvent = { event in
+                switch event {
+                case .apnsChallenge:
+                    diagnosticEvent(.apnsChallenge)
+                case .recaptchaChallenge:
+                    diagnosticEvent(.recaptchaChallenge)
+                @unknown default:
+                    break
+                }
+            }
+        }
         
         mtRequest.shouldContinueExecutionWithErrorContext = { errorContext in
             guard let errorContext = errorContext else {

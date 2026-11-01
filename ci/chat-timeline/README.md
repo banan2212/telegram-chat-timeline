@@ -24,7 +24,7 @@ Only the standard `xcode-27` runner is used, and the job refuses private reposit
 
 ### Focused checks before the full build
 
-The separate manual workflow **Chat Timeline - focused checks** (`chat-timeline-checks.yml`) runs Swift syntax checks for `ChatTimeline*.swift` and compiles/runs the pure Foundation date-selection regression program. It uses the exact dispatched commit on the same free `xcode-27` runner, with a 15-minute limit and no Telegram/Apple login. Run it on the published feature branch after the feature files and `Tests/ChatTimeline/TimelineDateSelectionChecks.swift` are present. Passing these checks does not establish full Telegram linkage or UI behavior.
+The separate manual workflow **Chat Timeline - focused checks** (`chat-timeline-checks.yml`) parses the changed Timeline and authorization Swift files and compiles/runs the pure Foundation date-selection and authorization-diagnostics programs. It uses the exact dispatched commit on the same free `xcode-27` runner, with a 15-minute limit and no Telegram/Apple login. Run it on the published feature branch. Passing these checks does not establish full Telegram linkage or UI behavior. See [opt-in authorization diagnostics](AUTH-DIAGNOSTICS.md) for its scope and privacy boundaries.
 
 Local CI guard checks: `python -B ci/chat-timeline/test_bootstrap.py`. These check public sample provenance, missing secrets, expired/near-expiry device profiles, source mismatch and rejection of a simulator artifact as an iPhone artifact. They simulate host metadata and cannot establish native signing or compilation.
 

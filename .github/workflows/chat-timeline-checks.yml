@@ -20,7 +20,8 @@ jobs:
           ref: ${{ github.sha }}
           sparse-checkout: |
             submodules/TelegramUI/Sources
-            submodules/TelegramCore/Sources/TelegramEngine/Messages
+            submodules/TelegramCore/Sources
+            submodules/AuthorizationUI/Sources
             Tests/ChatTimeline
             ci/chat-timeline
             build-system/fake-codesigning
@@ -46,7 +47,13 @@ jobs:
             submodules/TelegramUI/Sources/ChatHistoryListNode.swift \
             submodules/TelegramUI/Sources/Chat/ChatControllerNavigateToMessage.swift \
             submodules/TelegramCore/Sources/TelegramEngine/Messages/SearchMessages.swift \
-            submodules/TelegramCore/Sources/TelegramEngine/Messages/TelegramEngineMessages.swift; do
+            submodules/TelegramCore/Sources/TelegramEngine/Messages/TelegramEngineMessages.swift \
+            submodules/TelegramCore/Sources/Authorization.swift \
+            submodules/TelegramCore/Sources/AuthorizationDiagnostics.swift \
+            submodules/TelegramCore/Sources/Network/NetworkEngine.swift \
+            submodules/TelegramCore/Sources/Network/MtProtoKitEngine.swift \
+            submodules/TelegramCore/Sources/Network/Network.swift \
+            submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift; do
             xcrun swiftc -frontend -parse "$file"
           done
 
@@ -58,3 +65,12 @@ jobs:
             -o "$RUNNER_TEMP/timeline-date-tests"
           "$RUNNER_TEMP/timeline-date-tests"
           printf '%s\n' 'Swift syntax and Foundation date-selection checks passed. Full app compilation, native UI behavior and iPhone tests remain separate.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile and run pure Foundation authorization-diagnostics checks
+        run: |
+          xcrun swiftc \
+            submodules/TelegramCore/Sources/AuthorizationDiagnostics.swift \
+            Tests/ChatTimeline/AuthorizationDiagnosticsChecks.swift \
+            -o "$RUNNER_TEMP/authorization-diagnostics-tests"
+          "$RUNNER_TEMP/authorization-diagnostics-tests"
+          printf '%s\n' 'Foundation authorization-diagnostics checks passed. Network integration, full app compilation and authenticated iPhone behavior remain separate.' >> "$GITHUB_STEP_SUMMARY"

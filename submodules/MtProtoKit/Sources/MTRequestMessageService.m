@@ -988,6 +988,9 @@
                             
                             restartRequest = true;
                         } else if (rpcError.errorCode == 403 && [rpcError.errorDescription rangeOfString:@"APNS_VERIFY_CHECK_"].location != NSNotFound) {
+                            if (request.diagnosticEvent != nil) {
+                                request.diagnosticEvent(MTRequestDiagnosticEventApnsChallenge);
+                            }
                             if (request.errorContext == nil) {
                                 request.errorContext = [[MTRequestErrorContext alloc] init];
                             }
@@ -1016,6 +1019,9 @@
                             
                             restartRequest = true;
                         } else if (rpcError.errorCode == 403 && [rpcError.errorDescription rangeOfString:@"RECAPTCHA_CHECK_"].location != NSNotFound) {
+                            if (request.diagnosticEvent != nil) {
+                                request.diagnosticEvent(MTRequestDiagnosticEventRecaptchaChallenge);
+                            }
                             NSString *checkData = [rpcError.errorDescription substringFromIndex:[@"RECAPTCHA_CHECK_" length]];
                             
                             NSRange separatorRange = [checkData rangeOfString:@"__"];
