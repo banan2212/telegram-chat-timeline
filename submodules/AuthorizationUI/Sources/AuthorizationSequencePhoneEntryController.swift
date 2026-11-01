@@ -34,6 +34,9 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     private let back: () -> Void
     
     private var currentData: (Int32, String?, String)?
+    private var qrLoginIsPresented = false
+    private var passkeyPresentationGeneration: UInt64 = 0
+    private var passkeyController: ASAuthorizationController?
         
     var codeNode: ASDisplayNode {
         return self.controllerNode.codeNode
@@ -49,6 +52,10 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     
     public var inProgress: Bool = false {
         didSet {
+            if self.inProgress {
+                self.passkeyPresentationGeneration &+= 1
+                self.passkeyController = nil
+            }
             self.updateNavigationItems()
             self.controllerNode.inProgress = self.inProgress
             self.confirmationController?.inProgress = self.inProgress
@@ -56,7 +63,9 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     }
     public var loginWithNumber: ((String, Bool) -> Void)?
     public var loginWithPasskey: ((AuthorizationPasskeyData, Bool) -> Void)?
-    var accountUpdated: ((UnauthorizedAccount) -> Void)?
+    var loginWithQRCode: ((Bool) -> Void)? {
+        didSet { self.updateNavigationItems() }
+    }
     
     weak var confirmationController: PhoneConfirmationController?
     
@@ -112,15 +121,40 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     }
     
     func updateNavigationItems() {
-        guard let layout = self.validLayout, layout.size.width < 360.0 else {
+        guard let layout = self.validLayout else {
             return
         }
-                
         if self.inProgress {
-            let item = UIBarButtonItem(customDisplayNode: ProgressNavigationButtonNode(color: self.presentationData.theme.rootController.navigationBar.accentTextColor))
-            self.navigationItem.rightBarButtonItem = item
-        } else {
+            self.navigationItem.rightBarButtonItem = layout.size.width < 360.0 ? UIBarButtonItem(customDisplayNode: ProgressNavigationButtonNode(color: self.presentationData.theme.rootController.navigationBar.accentTextColor)) : nil
+        } else if self.account != nil, self.loginWithQRCode != nil {
+            let node = AuthorizationQRLoginNavigationNode(color: self.presentationData.theme.rootController.navigationBar.accentTextColor, nextTitle: layout.size.width < 360.0 ? self.presentationData.strings.Common_Next : nil, qrPressed: { [weak self] in
+                self?.qrLoginPressed()
+            }, nextPressed: { [weak self] in
+                self?.nextPressed()
+            })
+            self.navigationItem.rightBarButtonItem = UIBarButtonItem(customDisplayNode: node)
+        } else if layout.size.width < 360.0 {
             self.navigationItem.rightBarButtonItem = UIBarButtonItem(title: self.presentationData.strings.Common_Next, style: .done, target: self, action: #selector(self.nextPressed))
+        } else {
+            self.navigationItem.rightBarButtonItem = nil
+        }
+    }
+
+    private func qrLoginPressed() {
+        guard self.account != nil, !self.inProgress, self.confirmationController == nil else { return }
+        self.view.endEditing(true)
+        self.loginWithQRCode?(self.controllerNode.syncContacts)
+    }
+
+    func updateAccountAfterQRLogin(_ account: UnauthorizedAccount) {
+        self.account = account
+    }
+
+    func setQRLoginPresented(_ presented: Bool) {
+        self.qrLoginIsPresented = presented
+        if presented {
+            self.passkeyPresentationGeneration &+= 1
+            self.passkeyController = nil
         }
     }
     
@@ -150,13 +184,6 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
             strongSelf.view.endEditing(true)
             self?.present(debugController(sharedContext: strongSelf.sharedContext, context: nil, modal: true), in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
         }, hasOtherAccounts: self.otherAccountPhoneNumbers.0 != nil)
-        self.controllerNode.accountUpdated = { [weak self] account in
-            guard let strongSelf = self else {
-                return
-            }
-            strongSelf.account = account
-            strongSelf.accountUpdated?(account)
-        }
         self.controllerNode.retryPasskey = { [weak self] in
             guard let self else {
                 return
@@ -205,8 +232,11 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     
     private func loadAndPresentPasskey(force: Bool) {
         if #available(iOS 16.0, *) {
+            guard !self.qrLoginIsPresented, !self.inProgress else { return }
+            self.passkeyPresentationGeneration &+= 1
+            let generation = self.passkeyPresentationGeneration
             Task { @MainActor [weak self] in
-                guard let self, let account = self.account else {
+                guard let self, let account = self.account, generation == self.passkeyPresentationGeneration, !self.qrLoginIsPresented, !self.inProgress else {
                     return
                 }
                 
@@ -221,6 +251,7 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
                 
                 let engine = TelegramEngineUnauthorized(account: account)
                 let passkeyDataString = await engine.auth.requestPasskeyLoginData(apiId: self.apiId, apiHash: self.apiHash).get()
+                guard generation == self.passkeyPresentationGeneration, !self.qrLoginIsPresented, !self.inProgress else { return }
                 guard let passkeyDataString, let passkeyData = passkeyDataString.data(using: .utf8) else {
                     return
                 }
@@ -243,6 +274,7 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
                 let platformProvider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: relyingPartyIdentifier)
                 let platformKeyRequest = platformProvider.createCredentialAssertionRequest(challenge: challengeData)
                 let authController = ASAuthorizationController(authorizationRequests: [platformKeyRequest])
+                self.passkeyController = authController
                 authController.delegate = self
                 authController.presentationContextProvider = self
                 if force {
@@ -256,9 +288,10 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     
     public func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
         Task { @MainActor [weak self] in
-            guard let self, let account = self.account else {
+            guard let self, let account = self.account, self.passkeyController === controller, !self.qrLoginIsPresented, !self.inProgress else {
                 return
             }
+            self.passkeyController = nil
             
             let encodeBase64URL: (Data) -> String = { data in
                 var string = data.base64EncodedString()
@@ -304,6 +337,8 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     }
 
     public func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: any Error) {
+        guard self.passkeyController === controller, !self.qrLoginIsPresented else { return }
+        self.passkeyController = nil
         if (error as NSError).domain == "com.apple.AuthenticationServices.AuthorizationError" && (error as NSError).code == 1001 {
             self.controllerNode.updateDisplayPasskeyLoginOption()
             if let validLayout = self.validLayout {
@@ -359,12 +394,8 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     override public func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
         super.containerLayoutUpdated(layout, transition: transition)
         
-        let hadLayout = self.validLayout != nil
         self.validLayout = layout
-        
-        if !hadLayout {
-            self.updateNavigationItems()
-        }
+        self.updateNavigationItems()
     
         self.controllerNode.containerLayoutUpdated(layout, navigationBarHeight: self.navigationLayout(layout: layout).navigationFrame.maxY, transition: transition)
         

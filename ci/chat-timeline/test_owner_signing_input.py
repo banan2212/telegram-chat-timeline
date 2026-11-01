@@ -89,6 +89,8 @@ class OwnerSigningInputTests(unittest.TestCase):
                 self.assertIn('--timestamp=none', arguments)
                 if '--entitlements' in arguments:
                     self.requested = plistlib.loads(Path(arguments[arguments.index('--entitlements') + 1]).read_bytes())
+                    sealed_info = plistlib.loads((Path(arguments[-1]) / 'Info.plist').read_bytes())
+                    self.assertIs(sealed_info['ChatTimelineQRLoginEnabled'], True)
                     for locale in ('ar', 'ko'):
                         localized = plistlib.loads((Path(arguments[-1]) / (locale + '.lproj') / 'InfoPlist.strings').read_bytes())
                         self.assertEqual(localized['CFBundleDisplayName'], 'Chat Timeline')
@@ -127,6 +129,7 @@ class OwnerSigningInputTests(unittest.TestCase):
             self.assertEqual(info['CFBundleName'], 'Chat Timeline')
             self.assertEqual(info['CFBundleDisplayName'], 'Chat Timeline')
             self.assertIs(info['ChatTimelineAuthDiagnosticsEnabled'], True)
+            self.assertIs(info['ChatTimelineQRLoginEnabled'], True)
             self.assertEqual(info['BGTaskSchedulerPermittedIdentifiers'], self.info['BGTaskSchedulerPermittedIdentifiers'])
             self.assertFalse(any('mobileprovision' in name for name in archive.namelist()))
             self.assertFalse(any(PROFILE in archive.read(name) for name in archive.namelist()))
@@ -141,6 +144,12 @@ class OwnerSigningInputTests(unittest.TestCase):
         self.assertEqual(manifest['sha256'], packaging.sha256(self.output / packaging.OUTPUT_NAME))
         self.assertEqual(manifest['source_revision'], REVISION)
         self.assertEqual(manifest['expected_signed_bundle_identifier'], BUNDLE)
+        self.assertIs(manifest['auth_diagnostics_enabled'], True)
+        self.assertIs(manifest['qr_login_enabled'], True)
+        with zipfile.ZipFile(self.ipa) as original:
+            original_info = plistlib.loads(original.read(packaging.APP_PATH + '/Info.plist'))
+            self.assertNotIn('ChatTimelineQRLoginEnabled', original_info)
+            self.assertEqual(original.read(packaging.APP_PATH + '/embedded.mobileprovision'), PROFILE)
         for key in ('embedded_profile_included', 'apple_private_key_used', 'device_installable_directly',
                     'device_tested', 'identity_mapping_runtime_verified'):
             self.assertIs(manifest[key], False)

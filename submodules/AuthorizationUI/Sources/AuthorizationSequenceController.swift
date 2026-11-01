@@ -31,6 +31,11 @@ private enum InnerState: Equatable {
     case authorized
 }
 
+private struct ObservedAuthorizationState: Equatable {
+    let state: InnerState
+    let masterDatacenterId: Int32?
+}
+
 public final class AuthorizationSequenceController: NavigationController, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     static func navigationBarTheme(_ theme: PresentationTheme) -> NavigationBarTheme {
         return NavigationBarTheme(overallDarkAppearance: theme.overallDarkAppearance, buttonColor: theme.chat.inputPanel.panelControlColor, disabledButtonColor: theme.intro.disabledTextColor, primaryTextColor: theme.intro.primaryTextColor, badgeBackgroundColor: theme.rootController.navigationBar.badgeBackgroundColor, badgeTextColor: theme.rootController.navigationBar.badgeTextColor, edgeEffectColor: .clear, accentButtonColor: theme.list.itemCheckColors.fillColor, accentDisabledButtonColor: theme.chat.inputPanel.panelControlDisabledColor, accentForegroundColor: theme.list.itemCheckColors.foregroundColor)
@@ -48,6 +53,15 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
     private var stateDisposable: Disposable?
     private let actionDisposable = MetaDisposable()
     private var applicationStateDisposable: Disposable?
+
+    // Separate from diagnostics, absent/false in normal builds.
+    private let qrLoginEnabled: Bool
+    private var applicationIsActive = true
+    private var qrLoginCoordinator: AuthorizationQRLoginCoordinator?
+    private var qrLoginController: AuthorizationQRLoginController?
+    private var pendingQRLoginState: InnerState?
+    private var qrLoginHandoff = AuthorizationQRLoginHandoffGate()
+    private let qrAccountReconciliation = MetaDisposable()
 
     // Absent in normal builds. The dedicated diagnostic signing input explicitly opts in.
     private let authorizationDiagnosticsEnabled: Bool
@@ -81,6 +95,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
         let diagnosticsEnabled = Bundle.main.object(forInfoDictionaryKey: "ChatTimelineAuthDiagnosticsEnabled") as? Bool == true
         self.authorizationDiagnosticsEnabled = diagnosticsEnabled
         self.authorizationDiagnosticsArmed = diagnosticsEnabled
+        self.qrLoginEnabled = Bundle.main.object(forInfoDictionaryKey: "ChatTimelineQRLoginEnabled") as? Bool == true
         
         let navigationStatusBar: NavigationStatusBarStyle
         switch presentationData.theme.rootController.statusBarStyle {
@@ -95,18 +110,18 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
         self.inAppPurchaseManager = InAppPurchaseManager(engine: .unauthorized(self.engine))
         
         self.stateDisposable = (self.engine.auth.state()
-        |> map { state -> InnerState in
+        |> map { state -> ObservedAuthorizationState in
             if case .authorized = state {
-                return .authorized
+                return ObservedAuthorizationState(state: .authorized, masterDatacenterId: nil)
             } else if case let .unauthorized(state) = state {
-                return .state(state.contents)
+                return ObservedAuthorizationState(state: .state(state.contents), masterDatacenterId: state.masterDatacenterId)
             } else {
-                return .state(.empty)
+                return ObservedAuthorizationState(state: .state(.empty), masterDatacenterId: nil)
             }
         }
         |> distinctUntilChanged
         |> deliverOnMainQueue).startStrict(next: { [weak self] state in
-            self?.updateState(state: state)
+            self?.receiveAuthorizationState(state)
         }).strict()
         
         self.applicationStateDisposable = (self.sharedContext.applicationBindings.applicationIsActive
@@ -114,6 +129,8 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
             guard let self else {
                 return
             }
+            self.applicationIsActive = isActive
+            self.qrLoginCoordinator?.updateApplicationIsActive(isActive)
             for viewController in self.viewControllers {
                 if let codeController = viewController as? AuthorizationSequenceCodeEntryController {
                     codeController.updateAppIsActive(isActive)
@@ -131,6 +148,8 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
         self.stateDisposable?.dispose()
         self.actionDisposable.dispose()
         self.applicationStateDisposable?.dispose()
+        self.qrLoginCoordinator?.cancel()
+        self.qrAccountReconciliation.dispose()
     }
     
     override public func loadView() {
@@ -148,6 +167,174 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
         self.authorizationDiagnostics?.cancel()
         self.authorizationDiagnostics = nil
         if disarm { self.authorizationDiagnosticsArmed = false }
+    }
+
+    private func beginQRLogin(syncContacts: Bool) {
+        guard self.qrLoginEnabled else { return }
+        if case .authorized? = self.pendingQRLoginState {
+            self.applyPendingQRLoginState()
+            return
+        }
+        guard self.qrLoginCoordinator == nil, self.pendingQRLoginState == nil,
+            let phoneController = self.viewControllers.last as? AuthorizationSequencePhoneEntryController, !phoneController.inProgress else { return }
+        self.cancelAuthorizationDiagnostics(disarm: true)
+        phoneController.setQRLoginPresented(true)
+        self.qrLoginHandoff.beginSession()
+        let controller = AuthorizationQRLoginController(presentationData: self.presentationData)
+        let coordinator = AuthorizationQRLoginCoordinator(sharedContext: self.sharedContext, account: self.account, syncContacts: syncContacts)
+        self.qrLoginController = controller
+        self.qrLoginCoordinator = coordinator
+        coordinator.displayStateUpdated = { [weak controller] state in
+            controller?.update(state)
+        }
+        coordinator.accountUpdated = { [weak self, weak coordinator] updatedAccount in
+            guard let self, let coordinator, self.qrLoginCoordinator === coordinator else { return }
+            self.qrLoginHandoff.invalidateReconciliation()
+            self.qrAccountReconciliation.set(nil)
+            self.adoptQRLoginAccount(updatedAccount)
+        }
+        coordinator.completed = { [weak self, weak coordinator] in
+            guard let self, let coordinator, self.qrLoginCoordinator === coordinator else { return }
+            self.endQRLogin()
+        }
+        coordinator.stopped = { [weak self, weak coordinator] in
+            guard let self, let coordinator, self.qrLoginCoordinator === coordinator else { return }
+            if self.pendingQRLoginState != nil {
+                self.endQRLogin()
+            }
+        }
+        controller.retry = { [weak coordinator] in coordinator?.start() }
+        controller.cancelled = { [weak self, weak coordinator] in
+            guard let self, let coordinator, self.qrLoginCoordinator === coordinator else { return }
+            self.endQRLogin()
+        }
+        self.view.endEditing(true)
+        self.present(controller, in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
+        coordinator.updateApplicationIsActive(self.applicationIsActive)
+        coordinator.start()
+    }
+
+    private func adoptQRLoginAccount(_ updatedAccount: UnauthorizedAccount) {
+        self.account = updatedAccount
+        self.inAppPurchaseManager = InAppPurchaseManager(engine: .unauthorized(self.engine))
+        for controller in self.viewControllers {
+            (controller as? AuthorizationSequencePhoneEntryController)?.updateAccountAfterQRLogin(updatedAccount)
+        }
+    }
+
+    private func endQRLogin() {
+        let coordinator = self.qrLoginCoordinator
+        self.qrLoginCoordinator = nil
+        coordinator?.cancel()
+        self.qrLoginController?.finish()
+        self.qrLoginController = nil
+        for controller in self.viewControllers {
+            (controller as? AuthorizationSequencePhoneEntryController)?.setQRLoginPresented(false)
+        }
+        self.applyPendingQRLoginState()
+    }
+
+    private func receiveAuthorizationState(_ observed: ObservedAuthorizationState) {
+        if self.qrLoginHandoff.ownsAuthorization {
+            let destination: AuthorizationQRLoginHandoffGate.Destination?
+            switch observed.state {
+            case .authorized:
+                destination = .authorized
+            case .state(.passwordEntry):
+                if let masterDatacenterId = observed.masterDatacenterId {
+                    destination = .password(masterDatacenterId: masterDatacenterId)
+                } else {
+                    destination = nil
+                }
+            default:
+                destination = nil
+            }
+            if let destination {
+                self.qrAccountReconciliation.set(nil)
+                self.qrLoginHandoff.observe(destination)
+                self.pendingQRLoginState = observed.state
+                // Core commits state before emitting its migrated account. Keep
+                // the coordinator alive through that handoff (bounded request).
+                if self.qrLoginCoordinator?.isActive == true { return }
+                self.endQRLogin()
+                return
+            }
+            // A newer nonterminal state invalidates any delayed reconciliation.
+            self.pendingQRLoginState = nil
+            self.qrLoginHandoff.discardPendingState()
+            self.qrAccountReconciliation.set(nil)
+        }
+        self.updateState(state: observed.state)
+    }
+
+    private func applyPendingQRLoginState() {
+        guard let pendingState = self.pendingQRLoginState, let destination = self.qrLoginHandoff.destination else { return }
+        self.qrLoginHandoff.invalidateReconciliation()
+        let revision = self.qrLoginHandoff.revision
+        self.qrAccountReconciliation.set(nil)
+        switch destination {
+        case .authorized:
+            self.qrLoginController?.update(.finishing)
+            let currentReconciliation = MetaDisposable()
+            self.qrAccountReconciliation.set(currentReconciliation)
+            currentReconciliation.set((self.engine.auth.completeQRLoginIfAlreadyAuthorized(accountManager: self.sharedContext.accountManager)
+            |> deliverOnMainQueue).startStrict(next: { [weak self] completed in
+                guard let self, self.qrLoginHandoff.canApply(revision: revision, accountMasterDatacenterId: self.account.masterDatacenterId) else { return }
+                guard completed else {
+                    self.showQRLoginCompletionError()
+                    return
+                }
+                guard self.qrLoginHandoff.consume(revision: revision, accountMasterDatacenterId: self.account.masterDatacenterId) else { return }
+                self.pendingQRLoginState = nil
+                self.qrLoginController?.finish()
+                self.qrLoginController = nil
+                self.updateState(state: pendingState)
+            }))
+        case let .password(masterDatacenterId) where masterDatacenterId != self.account.masterDatacenterId:
+            // Cancellation can discard the export callback after Core committed
+            // a password state. Recover the authoritative DC using the normal
+            // account API, without retaining the cancelled export request.
+            let currentReconciliation = MetaDisposable()
+            self.qrAccountReconciliation.set(currentReconciliation)
+            currentReconciliation.set((self.account.changedMasterDatacenterId(accountManager: self.sharedContext.accountManager, masterDatacenterId: masterDatacenterId)
+            |> deliverOnMainQueue).startStrict(next: { [weak self] updatedAccount in
+                guard let self, self.qrLoginHandoff.consume(revision: revision, accountMasterDatacenterId: updatedAccount.masterDatacenterId) else { return }
+                self.adoptQRLoginAccount(updatedAccount)
+                self.pendingQRLoginState = nil
+                self.updateState(state: pendingState)
+            }))
+        default:
+            guard self.qrLoginHandoff.consume(revision: revision, accountMasterDatacenterId: self.account.masterDatacenterId) else { return }
+            self.pendingQRLoginState = nil
+            self.updateState(state: pendingState)
+        }
+    }
+
+    private func showQRLoginCompletionError() {
+        let controller: AuthorizationQRLoginController
+        let shouldPresent: Bool
+        if let current = self.qrLoginController {
+            controller = current
+            shouldPresent = false
+        } else {
+            controller = AuthorizationQRLoginController(presentationData: self.presentationData)
+            self.qrLoginController = controller
+            shouldPresent = true
+        }
+        // This retry finishes only an already-authorized local account. It does
+        // not resume token export after Cancel, or approve a server session.
+        controller.retry = { [weak self] in self?.applyPendingQRLoginState() }
+        controller.cancelled = { [weak self, weak controller] in
+            guard let self, let controller, self.qrLoginController === controller else { return }
+            self.qrLoginHandoff.invalidateReconciliation()
+            self.qrAccountReconciliation.set(nil)
+            self.qrLoginController = nil
+            controller.finish()
+        }
+        controller.update(.retry(.completionFailed))
+        if shouldPresent {
+            self.present(controller, in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
+        }
     }
 
     private func takeAuthorizationDiagnosticSummary(_ diagnostics: AuthorizationCodeDiagnostics?, generation: UInt64) -> String? {
@@ -220,17 +407,16 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
             if let splashController = splashController {
                 controller.animateWithSplashController(splashController)
             }
-            controller.accountUpdated = { [weak self] updatedAccount in
-                guard let strongSelf = self else {
-                    return
+            if self.qrLoginEnabled {
+                controller.loginWithQRCode = { [weak self] syncContacts in
+                    self?.beginQRLogin(syncContacts: syncContacts)
                 }
-                strongSelf.account = updatedAccount
-                strongSelf.inAppPurchaseManager = InAppPurchaseManager(engine: .unauthorized(strongSelf.engine))
             }
             controller.loginWithNumber = { [weak self, weak controller] number, syncContacts in
-                guard let self else {
+                guard let self, controller?.inProgress == false, self.qrLoginCoordinator == nil, self.pendingQRLoginState == nil else {
                     return
                 }
+                self.qrLoginHandoff.releaseOwnership()
                 self.cancelAuthorizationDiagnostics()
                 let diagnosticGeneration = self.authorizationDiagnosticsGeneration
                 let diagnostics: AuthorizationCodeDiagnostics?
@@ -371,10 +557,12 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                 })
             }
             controller.loginWithPasskey = { [weak self, weak controller] passkey, syncContacts in
-                guard let self else {
+                guard let self, let controller, !controller.inProgress, self.qrLoginCoordinator == nil, self.pendingQRLoginState == nil else {
                     return
                 }
+                self.qrLoginHandoff.releaseOwnership()
                 self.cancelAuthorizationDiagnostics(disarm: true)
+                controller.inProgress = true
                 
                 self.actionDisposable.set((authorizeWithPasskey(
                     accountManager: self.sharedContext.accountManager,
@@ -389,7 +577,8 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                     },
                     syncContacts: syncContacts
                 )
-                |> deliverOnMainQueue).startStrict(next: { [weak self] result in
+                |> deliverOnMainQueue).startStrict(next: { [weak self, weak controller] result in
+                    controller?.inProgress = false
                     guard let self else {
                         return
                     }
@@ -400,6 +589,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
                 }, error: { [weak self, weak controller] error in
                     Queue.mainQueue().async {
                         if let strongSelf = self, let controller {
+                            controller.inProgress = false
                             let text: String
                             switch error {
                             case .limitExceeded:

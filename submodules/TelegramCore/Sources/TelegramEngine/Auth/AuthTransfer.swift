@@ -20,6 +20,54 @@ public enum ExportAuthTransferTokenResult {
     case passwordRequested(UnauthorizedAccount)
 }
 
+private func authTransferTestingEnvironment(_ attributes: [TelegramAccountManagerTypes.Attribute]) -> Bool {
+    return attributes.contains(where: { attribute in
+        if case let .environment(environment) = attribute, case .test = environment.environment {
+            return true
+        }
+        return false
+    })
+}
+
+// Shared by normal QR completion and recovery after a cancelled subscription.
+// AccountManager serializes this transaction: a delayed original completion
+// must not switch accounts twice or remove a newer authentication record.
+private func completeAuthTransferAccount(transaction: AccountManagerModifier<TelegramAccountManagerTypes>, account: UnauthorizedAccount) -> Bool {
+    if let record = transaction.getRecords().first(where: { $0.id == account.id }) {
+        guard transaction.getCurrentAuth()?.id != account.id,
+            record.temporarySessionId == nil,
+            authTransferTestingEnvironment(record.attributes) == account.testingEnvironment,
+            !record.attributes.contains(where: { if case .loggedOut = $0 { return true }; return false }) else {
+            return false
+        }
+        return true
+    }
+    // createAuth stores its placeholder separately from getRecords(). Only the
+    // exact still-current auth record can become a newly authorized record.
+    guard let authRecord = transaction.getCurrentAuth(), authRecord.id == account.id,
+        authTransferTestingEnvironment(authRecord.attributes) == account.testingEnvironment else {
+        return false
+    }
+    switchToAuthorizedAccount(transaction: transaction, account: account, isSupportUser: false)
+    return true
+}
+
+func _internal_completeQRLoginIfAlreadyAuthorized(accountManager: AccountManager<TelegramAccountManagerTypes>, account: UnauthorizedAccount) -> Signal<Bool, NoError> {
+    return account.postbox.transaction { transaction -> Bool in
+        guard let state = transaction.getState() as? AuthorizedAccountState,
+            state.isTestingEnvironment == account.testingEnvironment else {
+            return false
+        }
+        return true
+    }
+    |> mapToSignal { authorized -> Signal<Bool, NoError> in
+        guard authorized else { return .single(false) }
+        return accountManager.transaction { transaction -> Bool in
+            return completeAuthTransferAccount(transaction: transaction, account: account)
+        }
+    }
+}
+
 func _internal_exportAuthTransferToken(accountManager: AccountManager<TelegramAccountManagerTypes>, account: UnauthorizedAccount, otherAccountUserIds: [PeerId.Id], syncContacts: Bool) -> Signal<ExportAuthTransferTokenResult, ExportAuthTransferTokenError> {
     return account.network.request(Api.functions.auth.exportLoginToken(apiId: account.networkArguments.apiId, apiHash: account.networkArguments.apiHash, exceptIds: otherAccountUserIds.map({ $0._internalGetInt64Value() })))
     |> map(Optional.init)
@@ -108,11 +156,13 @@ func _internal_exportAuthTransferToken(accountManager: AccountManager<TelegramAc
                                 let state = AuthorizedAccountState(isTestingEnvironment: updatedAccount.testingEnvironment, masterDatacenterId: updatedAccount.masterDatacenterId, peerId: user.id, state: nil, invalidatedChannels: [])
                                 initializedAppSettingsAfterLogin(transaction: transaction, appVersion: updatedAccount.networkArguments.appVersion, syncContacts: syncContacts)
                                 transaction.setState(state)
-                                return accountManager.transaction { transaction -> ExportAuthTransferTokenResult in
-                                    switchToAuthorizedAccount(transaction: transaction, account: updatedAccount, isSupportUser: false)
-                                    return .loggedIn
+                                return accountManager.transaction { transaction -> Bool in
+                                    return completeAuthTransferAccount(transaction: transaction, account: updatedAccount)
                                 }
                                 |> castError(ExportAuthTransferTokenError.self)
+                                |> mapToSignal { completed -> Signal<ExportAuthTransferTokenResult, ExportAuthTransferTokenError> in
+                                    return completed ? .single(.loggedIn) : .fail(.generic)
+                                }
                             }
                             |> castError(ExportAuthTransferTokenError.self)
                             |> switchToLatest
@@ -138,11 +188,13 @@ func _internal_exportAuthTransferToken(accountManager: AccountManager<TelegramAc
                     let state = AuthorizedAccountState(isTestingEnvironment: account.testingEnvironment, masterDatacenterId: account.masterDatacenterId, peerId: user.id, state: nil, invalidatedChannels: [])
                     initializedAppSettingsAfterLogin(transaction: transaction, appVersion: account.networkArguments.appVersion, syncContacts: syncContacts)
                     transaction.setState(state)
-                    return accountManager.transaction { transaction -> ExportAuthTransferTokenResult in
-                        switchToAuthorizedAccount(transaction: transaction, account: account, isSupportUser: false)
-                        return .loggedIn
+                    return accountManager.transaction { transaction -> Bool in
+                        return completeAuthTransferAccount(transaction: transaction, account: account)
                     }
                     |> castError(ExportAuthTransferTokenError.self)
+                    |> mapToSignal { completed -> Signal<ExportAuthTransferTokenResult, ExportAuthTransferTokenError> in
+                        return completed ? .single(.loggedIn) : .fail(.generic)
+                    }
                 }
                 |> castError(ExportAuthTransferTokenError.self)
                 |> switchToLatest

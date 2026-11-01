@@ -20,6 +20,12 @@ public extension TelegramEngineUnauthorized {
             return _internal_exportAuthTransferToken(accountManager: accountManager, account: self.account, otherAccountUserIds: otherAccountUserIds, syncContacts: syncContacts)
         }
 
+        // Local completion only. Requires an authorized state already committed
+        // by Core; never creates or approves a login token.
+        public func completeQRLoginIfAlreadyAuthorized(accountManager: AccountManager<TelegramAccountManagerTypes>) -> Signal<Bool, NoError> {
+            return _internal_completeQRLoginIfAlreadyAuthorized(accountManager: accountManager, account: self.account)
+        }
+
         public func twoStepAuthData() -> Signal<TwoStepAuthData, MTRpcError> {
             return _internal_twoStepAuthData(self.account.network)
         }

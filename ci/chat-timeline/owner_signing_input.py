@@ -222,7 +222,8 @@ alone cannot prove which source bytes an arbitrary pre-existing binary contains.
             app = stage / APP_PATH
             info, targets = _validate_app(app, bundle, version, build)
             info.update(CFBundleIdentifier=CANONICAL_BUNDLE, CFBundleName='Chat Timeline',
-                        CFBundleDisplayName='Chat Timeline', ChatTimelineAuthDiagnosticsEnabled=True)
+                        CFBundleDisplayName='Chat Timeline', ChatTimelineAuthDiagnosticsEnabled=True,
+                        ChatTimelineQRLoginEnabled=True)
             # AltServer appends .TEAM to canonical B and each requested App Group.
             # BGTask identifiers deliberately remain final-B values compiled above.
             (app / 'Info.plist').write_bytes(plistlib.dumps(info))
@@ -251,7 +252,7 @@ alone cannot prove which source bytes an arbitrary pre-existing binary contains.
             'signing': 'ad-hoc canonical request template; requires owner AltServer signing',
             'embedded_profile_included': False, 'apple_private_key_used': False,
             'device_installable_directly': False, 'device_tested': False,
-            'auth_diagnostics_enabled': True, 'sha256': sha256(destination),
+            'auth_diagnostics_enabled': True, 'qr_login_enabled': True, 'sha256': sha256(destination),
             'bytes': destination.stat().st_size,
             'identity_mapping_runtime_verified': False,
         }

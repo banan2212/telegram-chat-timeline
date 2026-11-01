@@ -63,9 +63,14 @@ jobs:
             submodules/TelegramCore/Sources/TelegramEngine/Messages/TelegramEngineMessages.swift \
             submodules/TelegramCore/Sources/Authorization.swift \
             submodules/TelegramCore/Sources/AuthorizationDiagnostics.swift \
+            submodules/TelegramCore/Sources/TelegramEngine/Auth/AuthTransfer.swift \
+            submodules/TelegramCore/Sources/TelegramEngine/Auth/TelegramEngineAuth.swift \
             submodules/TelegramCore/Sources/Network/NetworkEngine.swift \
             submodules/TelegramCore/Sources/Network/MtProtoKitEngine.swift \
             submodules/TelegramCore/Sources/Network/Network.swift \
+            submodules/AuthorizationUI/Sources/AuthorizationQRLogin*.swift \
+            submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryController.swift \
+            submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift \
             submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift; do
             xcrun swiftc -frontend -parse "$file"
           done
@@ -87,6 +92,15 @@ jobs:
             -o "$RUNNER_TEMP/authorization-diagnostics-tests"
           "$RUNNER_TEMP/authorization-diagnostics-tests"
           printf '%s\n' 'Foundation authorization-diagnostics checks passed. Network integration, full app compilation and authenticated iPhone behavior remain separate.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile and run pure Foundation QR-login lifecycle checks
+        run: |
+          xcrun swiftc \
+            submodules/AuthorizationUI/Sources/AuthorizationQRLoginLifecycle.swift \
+            Tests/ChatTimeline/AuthorizationQRLoginChecks.swift \
+            -o "$RUNNER_TEMP/authorization-qr-login-tests"
+          "$RUNNER_TEMP/authorization-qr-login-tests"
+          printf '%s\n' 'Foundation QR-login lifecycle checks passed. UI types, full app compilation and owner-approved QR login remain separate.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check deferred owner build boundaries without owner data
         run: |
