@@ -24,9 +24,15 @@ Only the standard `xcode-27` runner is used, and the job refuses private reposit
 
 ### Focused checks before the full build
 
-The separate manual workflow **Chat Timeline - focused checks** (`chat-timeline-checks.yml`) parses the changed Timeline and authorization Swift files and compiles/runs the pure Foundation date-selection and authorization-diagnostics programs. It uses the exact dispatched commit on the same free `xcode-27` runner, with a 15-minute limit and no Telegram/Apple login. Run it on the published feature branch. Passing these checks does not establish full Telegram linkage or UI behavior. See [opt-in authorization diagnostics](AUTH-DIAGNOSTICS.md) for its scope and privacy boundaries.
+The separate manual workflow **Chat Timeline - focused checks** (`chat-timeline-checks.yml`) parses the changed Timeline and authorization Swift files and compiles/runs the pure Foundation date-selection, authorization-diagnostics and QR-login lifecycle programs. It uses the exact dispatched commit on the same free `xcode-27` runner, with a 15-minute limit and no Telegram/Apple login. Run it on the published feature branch. Passing these checks does not establish full Telegram linkage or UI behavior. See [opt-in authorization diagnostics](AUTH-DIAGNOSTICS.md) and [QR-login preparation](QR-LOGIN.md) for their scope and privacy boundaries.
 
 Local CI guard checks: `python -B ci/chat-timeline/test_bootstrap.py`. These check public sample provenance, missing secrets, expired/near-expiry device profiles, source mismatch and rejection of a simulator artifact as an iPhone artifact. They simulate host metadata and cannot establish native signing or compilation.
+
+### QR-login preparation
+
+The QR interface is opt-in through the main app's Boolean `ChatTimelineQRLoginEnabled`. The owner signing-input packager enables it before sealing the app; the ordinary simulator workflow compiles the QR modules but leaves the button disabled. [QR-LOGIN.md](QR-LOGIN.md) describes reproduction, approval, cancellation and the remaining verification limits.
+
+For native QR code commit `5db23d16da7fb15154ffb49b45be55e2b2f0e6f4`, [focused run 41342512328](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41342512328) passed. At the 2026-11-01 checkpoint, [full simulator run 41343133592](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41343133592) is still in progress on `966c6e2498149b084295ec9631892d2bfaa36a66`; that later commit only restricts workflow API-secret injection to explicit `secrets` mode. A successful full compile, QR approval and physical-iPhone Timeline acceptance remain separate checks.
 
 ## API configuration
 
@@ -45,7 +51,13 @@ The device path imports only upstream's published `fake-codesigning` fixture, sm
 An independent, explicit [owner-profile preparation workflow](OWNER-BUILD.md) is now
 available for a genuinely valid personal profile. It requires owner-approved
 private input, native Apple trust checks and later owner signing. It does not alter
-the fixture guard, and has not yet demonstrated an actual successful device build.
+the fixture guard. Earlier [owner run 41328740015](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41328740015)
+completed compilation and encrypted packaging, but its **overall result was failure**
+because private-directory cleanup failed. That run predates the QR implementation.
+The owner authorized one new QR build: [run 41343667365](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41343667365),
+source `966c6e2498149b084295ec9631892d2bfaa36a66`, is preparing dependencies at the
+2026-11-01 checkpoint. It has no successful build result yet. Profile values remain
+private. The later cleanup fix does not establish cleanup of the old runner.
 
 A device candidate inherits the fixture bundle ID so its provisioning matches. **Do not install it over the user's normal Telegram.** A later local signing process must create a distinct application and consistent extension/App Group identifiers, then validate launch, data separation and features on the iPhone. That process is not implemented or proven by this CI. No Apple ID, private certificate or password is collected here.
 
