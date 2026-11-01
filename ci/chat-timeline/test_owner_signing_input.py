@@ -59,6 +59,10 @@ class OwnerSigningInputTests(unittest.TestCase):
             packaging.APP_PATH + '/Frameworks/Sample.framework/Sample': binary(file_type=6),
             packaging.APP_PATH + '/Frameworks/libExample.dylib': binary(file_type=6),
         }
+        for locale, name in (('ar', '\u062a\u064a\u0644\u064a\u062c\u0631\u0627\u0645'), ('ko', '\ud154\ub808\uadf8\ub7a8')):
+            self.members[packaging.APP_PATH + '/' + locale + '.lproj/InfoPlist.strings'] = plistlib.dumps({
+                'CFBundleDisplayName': name, 'NSCameraUsageDescription': 'Preserve camera explanation ' + locale,
+            }, fmt=plistlib.FMT_BINARY)
         self.commands, self.requested = [], None
         self.revision, self.fail_signing, self.wrong_entitlements = REVISION, False, False
         self.mac = patch.object(packaging.platform, 'system', return_value='Darwin')
@@ -85,6 +89,9 @@ class OwnerSigningInputTests(unittest.TestCase):
                 self.assertIn('--timestamp=none', arguments)
                 if '--entitlements' in arguments:
                     self.requested = plistlib.loads(Path(arguments[arguments.index('--entitlements') + 1]).read_bytes())
+                    for locale in ('ar', 'ko'):
+                        localized = plistlib.loads((Path(arguments[-1]) / (locale + '.lproj') / 'InfoPlist.strings').read_bytes())
+                        self.assertEqual(localized['CFBundleDisplayName'], 'Chat Timeline')
             elif '-d' in arguments:
                 output = plistlib.dumps({} if self.wrong_entitlements else self.requested)
             else:
@@ -144,6 +151,29 @@ class OwnerSigningInputTests(unittest.TestCase):
 
     def test_embedded_profile_must_equal_exact_verified_bytes(self):
         self.members[packaging.APP_PATH + '/embedded.mobileprovision'] = b'different profile'
+        self.write_ipa()
+        self.rejected()
+        self.assertFalse(any('/usr/bin/codesign' in command for command in self.commands))
+
+    def test_localized_names_change_before_sealing_preserving_other_values_and_binary_format(self):
+        self.package()
+        with zipfile.ZipFile(self.output / packaging.OUTPUT_NAME) as archive:
+            for locale in ('ar', 'ko'):
+                name = packaging.APP_PATH + '/' + locale + '.lproj/InfoPlist.strings'
+                original = plistlib.loads(self.members[name])
+                result = archive.read(name)
+                self.assertTrue(result.startswith(b'bplist00'))
+                self.assertEqual(plistlib.loads(result), dict(original, CFBundleDisplayName='Chat Timeline'))
+
+    def test_localized_xml_format_is_preserved(self):
+        name = packaging.APP_PATH + '/ar.lproj/InfoPlist.strings'
+        self.members[name] = plistlib.dumps(plistlib.loads(self.members[name]), fmt=plistlib.FMT_XML)
+        self.package()
+        with zipfile.ZipFile(self.output / packaging.OUTPUT_NAME) as archive:
+            self.assertTrue(archive.read(name).startswith(b'<?xml'))
+
+    def test_missing_expected_localized_resource_rejects_before_signing(self):
+        del self.members[packaging.APP_PATH + '/ko.lproj/InfoPlist.strings']
         self.write_ipa()
         self.rejected()
         self.assertFalse(any('/usr/bin/codesign' in command for command in self.commands))

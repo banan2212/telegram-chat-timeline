@@ -42,7 +42,8 @@ class InputBoundaries(unittest.TestCase):
 
     def test_cleanup_only_generated_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary)
+            # macOS /var is an alias of /private/var; main() passes a resolved path.
+            source = Path(temporary).resolve()
             generated = source / 'build-input/configuration-repository'
             generated.mkdir(parents=True)
             (generated / 'private-fixture.txt').write_text('fixture')

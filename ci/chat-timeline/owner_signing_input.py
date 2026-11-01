@@ -180,6 +180,20 @@ def _adhoc(app: Path, targets: list[Path], entitlements: dict, stage: Path) -> N
     _require(actual == entitlements)
 
 
+def _localized_display_names(app: Path) -> None:
+    # These two compiled resources override the main Info.plist display name.
+    # Preserve their plist format and every other localization/permission string.
+    for locale in ('ar', 'ko'):
+        path = app / (locale + '.lproj') / 'InfoPlist.strings'
+        value = _plist(path)
+        _require(isinstance(value.get('CFBundleDisplayName'), str))
+        with path.open('rb') as stream:
+            binary = stream.read(8) == b'bplist00'
+        value['CFBundleDisplayName'] = 'Chat Timeline'
+        path.write_bytes(plistlib.dumps(value, fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML,
+                                        sort_keys=False))
+
+
 def package_input(source: Path, output: Path, verified_owner: dict, expected_revision: str) -> None:
     """Write only private IPA + manifest. Caller encrypts both before publication.
 
@@ -212,6 +226,7 @@ alone cannot prove which source bytes an arbitrary pre-existing binary contains.
             # AltServer appends .TEAM to canonical B and each requested App Group.
             # BGTask identifiers deliberately remain final-B values compiled above.
             (app / 'Info.plist').write_bytes(plistlib.dumps(info))
+            _localized_display_names(app)
             entitlements = {
                 'application-identifier': team + '.' + CANONICAL_BUNDLE,
                 'com.apple.developer.team-identifier': team,
