@@ -175,7 +175,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
             self.applyPendingQRLoginState()
             return
         }
-        guard self.qrLoginCoordinator == nil, self.pendingQRLoginState == nil,
+        guard self.qrLoginCoordinator == nil, self.pendingQRLoginState == nil, let window = self.currentWindow,
             let phoneController = self.viewControllers.last as? AuthorizationSequencePhoneEntryController, !phoneController.inProgress else { return }
         self.cancelAuthorizationDiagnostics(disarm: true)
         phoneController.setQRLoginPresented(true)
@@ -209,7 +209,8 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
             self.endQRLogin()
         }
         self.view.endEditing(true)
-        self.present(controller, in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
+        controller.presentationArguments = ViewControllerPresentationArguments(presentationAnimation: .modalSheet)
+        window.present(controller, on: .root, blockInteraction: false, completion: {})
         coordinator.updateApplicationIsActive(self.applicationIsActive)
         coordinator.start()
     }
@@ -311,6 +312,7 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
     }
 
     private func showQRLoginCompletionError() {
+        guard let window = self.currentWindow else { return }
         let controller: AuthorizationQRLoginController
         let shouldPresent: Bool
         if let current = self.qrLoginController {
@@ -333,7 +335,8 @@ public final class AuthorizationSequenceController: NavigationController, ASAuth
         }
         controller.update(.retry(.completionFailed))
         if shouldPresent {
-            self.present(controller, in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
+            controller.presentationArguments = ViewControllerPresentationArguments(presentationAnimation: .modalSheet)
+            window.present(controller, on: .root, blockInteraction: false, completion: {})
         }
     }
 
