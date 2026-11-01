@@ -21,6 +21,7 @@ import sys
 import zipfile
 
 import bootstrap
+from private_cleanup import PrivateCleanupError, cleanup_private
 
 
 class PrivateBuildRejected(RuntimeError):
@@ -216,8 +217,10 @@ def main() -> None:
             exit_code = 1
         finally:
             try:
-                if private.is_dir() and not private.is_symlink():
-                    shutil.rmtree(private)
+                cleanup_private(private, runner_temp)
+            except PrivateCleanupError as error:
+                print(f'Private temporary directory cleanup failed. stage={error.stage} reason={error.reason}.', file=sys.stderr)
+                exit_code = 1
             except BaseException:
                 print('Private temporary directory cleanup failed.', file=sys.stderr)
                 exit_code = 1

@@ -53,6 +53,7 @@ class InputBoundaries(unittest.TestCase):
             self.assertFalse(generated.exists())
             self.assertEqual('keep', keep.read_text())
 
+    @unittest.skipUnless(os.name == 'posix', 'Private cleanup requires POSIX descriptor primitives')
     def test_cleanup_failure_is_redacted_and_private_root_still_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -86,6 +87,27 @@ class InputBoundaries(unittest.TestCase):
             self.assertTrue(popen.call_args.kwargs['start_new_session'])
             self.assertEqual(2, killpg.call_count)
             self.assertTrue(all(call.args[0] == 12345 for call in killpg.call_args_list))
+
+    def test_private_cleanup_failures_emit_only_fixed_labels(self):
+        for failure in (ci.PrivateCleanupError('remove_tree', 'permission'), OSError('PRIVATE_SENTINEL')):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                source, runner = root / 'source', root / 'runner'
+                source.mkdir(); runner.mkdir()
+                private, output = runner / 'chat-timeline-owner-private', runner / 'chat-timeline-owner-encrypted'
+                stderr = io.StringIO()
+                with patch.dict(os.environ, {'GITHUB_WORKSPACE': str(root), 'RUNNER_TEMP': str(runner)}), \
+                        patch.object(sys, 'argv', ['owner_ci', '--source', str(source), '--private', str(private), '--output', str(output)]), \
+                        patch.object(ci, 'execute', side_effect=lambda *_: private.mkdir()), \
+                        patch.object(ci, 'cleanup_private', side_effect=failure), \
+                        contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as error:
+                        ci.main()
+                self.assertEqual(1, error.exception.code)
+                self.assertIn('Private temporary directory cleanup failed.', stderr.getvalue())
+                self.assertNotIn('PRIVATE_SENTINEL', stderr.getvalue())
+                if isinstance(failure, ci.PrivateCleanupError):
+                    self.assertIn('stage=remove_tree reason=permission', stderr.getvalue())
 
 
 @unittest.skipUnless(shutil.which('openssl'), 'OpenSSL is needed for actual envelope round trip')

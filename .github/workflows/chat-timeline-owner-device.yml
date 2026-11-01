@@ -84,22 +84,22 @@ jobs:
         if: ${{ always() }}
         run: |
           python3 - <<'PY'
-          import os, pathlib, shutil
+          import os, pathlib, sys
           try:
               root = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
               path = root / 'chat-timeline-owner-private'
-              if path.is_symlink():
-                  raise ValueError()
-              if path.exists():
-                  if path.resolve().parent != root:
-                      raise ValueError()
-                  shutil.rmtree(path)
               source = pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve() / 'source'
-              if (source / 'ci/chat-timeline/owner_ci.py').is_file():
-                  import sys
+              if (source / 'ci/chat-timeline/private_cleanup.py').is_file():
                   sys.path.insert(0, str(source / 'ci/chat-timeline'))
+                  from private_cleanup import PrivateCleanupError, cleanup_private
+                  try:
+                      cleanup_private(path, root)
+                  except PrivateCleanupError as error:
+                      raise SystemExit(f'Private runner cleanup failed: stage={error.stage} reason={error.reason}.') from None
                   from owner_ci import cleanup_configuration
                   cleanup_configuration(source)
+              elif path.exists() or path.is_symlink():
+                  raise ValueError()
           except Exception:
               raise SystemExit('Private runner cleanup did not finish; details omitted.') from None
           PY
