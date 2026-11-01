@@ -22,6 +22,7 @@ jobs:
             submodules/TelegramUI/Sources
             submodules/TelegramCore/Sources
             submodules/AuthorizationUI/Sources
+            submodules/MtProtoKit/PublicHeaders
             Tests/ChatTimeline
             ci/chat-timeline
             build-system/fake-codesigning
@@ -38,6 +39,18 @@ jobs:
           grep -Fxq 'Xcode 27.1' "$RUNNER_TEMP/chat-timeline-xcode-version.txt"
           xcrun swiftc --version
           printf 'Source revision: %s\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile the request header with native Objective-C nullability checks
+        run: |
+          ios_sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang \
+            -target arm64-apple-ios15.0 \
+            -isysroot "$ios_sdk_path" \
+            -fmodules -fmodules-cache-path="$RUNNER_TEMP/mtrequest-module-cache" \
+            -fobjc-arc -fblocks -fsyntax-only -x objective-c \
+            -Werror -Wnullability-completeness \
+            submodules/MtProtoKit/PublicHeaders/MtProtoKit/MTRequest.h
+          printf '%s\n' 'MTRequest.h compiled with iPhoneOS SDK and nullability warnings as errors. Full app compilation remains separate.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check Swift syntax of the feature and changed integration files
         run: |

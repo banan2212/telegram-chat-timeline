@@ -49,7 +49,7 @@ typedef NS_ENUM(NSInteger, MTRequestDiagnosticEvent) {
 @property (nonatomic, copy) void (^progressUpdated)(float progress, NSUInteger packetLength);
 @property (nonatomic, copy) void (^acknowledgementReceived)();
 /// Optional observer on the request service queue; must not block or reenter the service.
-@property (nonatomic, copy, nullable) void (^diagnosticEvent)(MTRequestDiagnosticEvent event);
+@property (nonatomic, copy) void (^diagnosticEvent)(MTRequestDiagnosticEvent event);
 
 @property (nonatomic, copy) bool (^shouldContinueExecutionWithErrorContext)(MTRequestErrorContext *errorContext);
 @property (nonatomic, copy) bool (^shouldDependOnRequest)(MTRequest *anotherRequest);
