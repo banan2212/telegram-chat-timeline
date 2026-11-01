@@ -12,7 +12,7 @@ import glob
 from BuildEnvironment import resolve_executable, call_executable, run_executable_with_output, BuildEnvironmentVersions, BuildEnvironment
 from ProjectGeneration import generate
 from BazelLocation import locate_bazel
-from BuildConfiguration import CodesigningSource, GitCodesigningSource, DirectoryCodesigningSource, XcodeManagedCodesigningSource, BuildConfiguration, build_configuration_from_json
+from BuildConfiguration import CodesigningSource, GitCodesigningSource, DirectoryCodesigningSource, DeferredOwnerCodesigningSource, XcodeManagedCodesigningSource, BuildConfiguration, build_configuration_from_json
 import RemoteBuild
 import TartBuild
 import GenerateProfiles
@@ -47,6 +47,7 @@ class BazelCommandLine:
         self.show_actions = False
         self.enable_sandbox = False
         self.disable_provisioning_profiles = False
+        self.deferred_owner_signing = False
         self.profile_swift = False
         self.embed_watch_app = False
         self.watch_api_id = None
@@ -142,6 +143,9 @@ class BazelCommandLine:
     def set_disable_provisioning_profiles(self):
         self.disable_provisioning_profiles = True
 
+    def set_deferred_owner_signing(self, value):
+        self.deferred_owner_signing = value
+
     def set_profile_swift(self, value):
         self.profile_swift = value
 
@@ -208,6 +212,8 @@ class BazelCommandLine:
 
     def get_startup_bazel_arguments(self):
         combined_arguments = []
+        if self.deferred_owner_signing:
+            combined_arguments += ['--batch']
         if self.bazel_user_root is not None:
             combined_arguments += ['--output_user_root={}'.format(self.bazel_user_root)]
         return combined_arguments
@@ -322,6 +328,19 @@ class BazelCommandLine:
         if self.profile_swift:
             combined_arguments += ['--config=swift_profile']
 
+        if self.deferred_owner_signing:
+            if self.disable_provisioning_profiles or self.embed_watch_app:
+                raise ValueError('Deferred owner signing requires the main profile and excludes Watch.')
+            combined_arguments += [
+                '--features=disable_legacy_signing',
+                '--//Telegram:disableExtensions=true',
+                '--//Telegram:embedWatchApp=false',
+                '--//Telegram:disableProvisioningProfiles=false',
+                # Device linking does not consume entitlements. Force their validation
+                # through the dossier, whose signing identity is resolved only later.
+                '--output_groups=+dossier',
+            ]
+
         print('TelegramBuild: running')
         print(subprocess.list2cmdline(combined_arguments))
         call_executable(combined_arguments)
@@ -404,7 +423,15 @@ def clean(bazel, arguments):
 
 def resolve_codesigning(arguments, base_path, build_configuration, provisioning_profiles_path, additional_codesigning_output_path) -> ResolvedCodesigningData:
     profile_source = None
-    if arguments.gitCodesigningRepository is not None:
+    deferred_owner_signing = getattr(arguments, 'deferredOwnerSigning', False)
+    if deferred_owner_signing:
+        validate_deferred_owner_signing_arguments(arguments)
+        profile_source = DeferredOwnerCodesigningSource(
+            directory_path=arguments.codesigningInformationPath,
+            team_id=build_configuration.team_id,
+            bundle_id=build_configuration.bundle_id
+        )
+    elif arguments.gitCodesigningRepository is not None:
         password = os.getenv('TELEGRAM_CODESIGNING_GIT_PASSWORD')
         if password is None:
             print('TELEGRAM_CODESIGNING_GIT_PASSWORD environment variable is not set')
@@ -445,7 +472,8 @@ def resolve_codesigning(arguments, base_path, build_configuration, provisioning_
 
     if additional_codesigning_output_path is not None:
         profile_source.copy_profiles_to_destination(destination_path=additional_codesigning_output_path + '/profiles')
-        profile_source.copy_certificates_to_destination(destination_path=additional_codesigning_output_path + '/certs')
+        if not deferred_owner_signing:
+            profile_source.copy_certificates_to_destination(destination_path=additional_codesigning_output_path + '/certs')
 
     return ResolvedCodesigningData(
         aps_environment=profile_source.resolve_aps_environment(),
@@ -604,7 +632,23 @@ def resolve_watch_provisioning_profile(arguments, base_path):
     return None
 
 
+def validate_deferred_owner_signing_arguments(arguments):
+    if not getattr(arguments, 'deferredOwnerSigning', False):
+        return
+    if (not getattr(arguments, 'codesigningInformationPath', None)
+            or getattr(arguments, 'gitCodesigningRepository', None) is not None
+            or getattr(arguments, 'xcodeManagedCodesigning', False)):
+        raise ValueError('--deferredOwnerSigning requires --codesigningInformationPath with profiles/Telegram.mobileprovision and selecteddevice.txt.')
+    if getattr(arguments, 'configuration', None) not in ('debug_arm64', 'release_arm64'):
+        raise ValueError('--deferredOwnerSigning requires an arm64 device configuration.')
+    if getattr(arguments, 'target', None) is not None:
+        raise ValueError('--deferredOwnerSigning builds only the default Telegram application target.')
+    if getattr(arguments, 'embedWatchApp', False) or getattr(arguments, 'disableProvisioningProfiles', False):
+        raise ValueError('--deferredOwnerSigning excludes Watch and requires provisioning profiles.')
+
+
 def build(bazel, arguments):
+    validate_deferred_owner_signing_arguments(arguments)
     if PostboxImportCheck.run(os.getcwd()) != 0:
         sys.exit(1)
 
@@ -614,6 +658,7 @@ def build(bazel, arguments):
         override_xcode_version=arguments.overrideXcodeVersion,
         bazel_user_root=arguments.bazelUserRoot
     )
+    bazel_command_line.set_deferred_owner_signing(getattr(arguments, 'deferredOwnerSigning', False))
 
     if arguments.lock:
         bazel_command_line.set_lock(True)
@@ -1025,6 +1070,15 @@ if __name__ == '__main__':
         metavar='number'
     )
     add_project_and_build_common_arguments(buildParser)
+    buildParser.add_argument(
+        '--deferredOwnerSigning',
+        action='store_true',
+        default=False,
+        help='Build only the main device app with profiles/Telegram.mobileprovision and selecteddevice.txt from --codesigningInformationPath. '
+             'Require native Apple CMS, development-certificate, selected-device and profile-lifetime verification on macOS. '
+             'Validate entitlements through a dossier, but defer signing to the owner; output is not directly installable. '
+             'Private keys are not loaded, absent APS is allowed only in this mode, and Bazel runs in batch mode.'
+    )
     buildParser.add_argument(
         '--configuration',
         choices=[

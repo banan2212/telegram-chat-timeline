@@ -1,0 +1,105 @@
+name: Chat Timeline - private owner profile device preparation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-timeline-owner-device
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    # Standard free runner for this public repository. No paid runner fallback.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: xcode-27
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXPECTED_REVISION: ${{ github.sha }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      SOURCE_KIND: feature
+    steps:
+      - name: Require explicitly supplied owner input
+        env:
+          CHAT_TIMELINE_OWNER_INPUT: ${{ secrets.CHAT_TIMELINE_OWNER_INPUT }}
+        run: |
+          if [ -z "$CHAT_TIMELINE_OWNER_INPUT" ]; then
+            printf '%s\n' 'Owner input is absent. No profile discovery or fallback is performed.'
+            exit 1
+          fi
+
+      - name: Checkout exact source and preparation tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          submodules: false
+          persist-credentials: false
+
+      - name: Select pinned Xcode
+        run: |
+          if [ -d /Applications/Xcode_27.1.app/Contents/Developer ]; then
+            sudo xcode-select --switch /Applications/Xcode_27.1.app/Contents/Developer
+          fi
+
+      - name: Materialize pinned submodules and check resources
+        timeout-minutes: 45
+        working-directory: source
+        run: |
+          git -c remote.origin.url=https://github.com/TelegramMessenger/Telegram-iOS.git submodule init
+          git submodule update --init --recursive --depth 1 --jobs 2
+          python3 ci/chat-timeline/bootstrap.py resources \
+            --source . --output "$RUNNER_TEMP/chat-timeline-owner-resources"
+          printf '\nbuild --jobs=2\n' >> .bazelrc
+
+      - name: Validate owner profile, build without a private signing key, encrypt signing input
+        timeout-minutes: 295
+        working-directory: source
+        env:
+          # Explicit owner-approved input only. No automatic profile/key discovery.
+          # JSON contains one profile, exact device ID, public encryption certificate.
+          CHAT_TIMELINE_OWNER_INPUT: ${{ secrets.CHAT_TIMELINE_OWNER_INPUT }}
+        run: |
+          python3 ci/chat-timeline/owner_ci.py --source . \
+            --private "$RUNNER_TEMP/chat-timeline-owner-private" \
+            --output "$RUNNER_TEMP/chat-timeline-owner-encrypted"
+
+      - name: Upload encrypted result only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chat-Timeline-owner-preparation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/chat-timeline-owner-encrypted/Chat-Timeline-private-result.zip.p7m
+            ${{ runner.temp }}/chat-timeline-owner-encrypted/encrypted-artifact.json
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Remove only the dedicated private runner directory
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          try:
+              root = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
+              path = root / 'chat-timeline-owner-private'
+              if path.is_symlink():
+                  raise ValueError()
+              if path.exists():
+                  if path.resolve().parent != root:
+                      raise ValueError()
+                  shutil.rmtree(path)
+              source = pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve() / 'source'
+              if (source / 'ci/chat-timeline/owner_ci.py').is_file():
+                  import sys
+                  sys.path.insert(0, str(source / 'ci/chat-timeline'))
+                  from owner_ci import cleanup_configuration
+                  cleanup_configuration(source)
+          except Exception:
+              raise SystemExit('Private runner cleanup did not finish; details omitted.') from None
+          PY

@@ -42,6 +42,11 @@ Simulator bundle ID is `org.banan2212.ChatTimeline`. Its `.ipa` is an archive fo
 
 The device path imports only upstream's published `fake-codesigning` fixture, smoke-checks its key with `codesign`, and uses `release_arm64`. The pinned profiles expire on **2026-10-30 at 17:06:30 UTC / 20:06:30 Moscow**. Expired profiles, or less than six hours remaining, block the device build. The check repeats immediately before compilation. It is never disabled. Simulator mode is independent of device profiles and is explicitly labelled as such.
 
+An independent, explicit [owner-profile preparation workflow](OWNER-BUILD.md) is now
+available for a genuinely valid personal profile. It requires owner-approved
+private input, native Apple trust checks and later owner signing. It does not alter
+the fixture guard, and has not yet demonstrated an actual successful device build.
+
 A device candidate inherits the fixture bundle ID so its provisioning matches. **Do not install it over the user's normal Telegram.** A later local signing process must create a distinct application and consistent extension/App Group identifiers, then validate launch, data separation and features on the iPhone. That process is not implemented or proven by this CI. No Apple ID, private certificate or password is collected here.
 
 ## Provenance and limits

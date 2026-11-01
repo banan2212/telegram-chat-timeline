@@ -4,6 +4,9 @@ import sys
 import shutil
 import tempfile
 import plistlib
+import importlib.util
+from pathlib import Path
+import re
 
 from BuildEnvironment import run_executable_with_output, check_run_system
 from DecryptMatch import decrypt_match_data
@@ -319,6 +322,58 @@ class DirectoryCodesigningSource(CodesigningSource):
 
     def copy_certificates_to_destination(self, destination_path):
         copy_certificates_from_directory(source_path=self.directory_path + '/certs', destination_path=destination_path)
+
+
+def load_deferred_owner_profile_verifier():
+    # Use this checkout's reviewed trust boundary, never Python's module search path.
+    path = Path(__file__).resolve().parents[2] / 'ci' / 'chat-timeline' / 'owner_profile.py'
+    spec = importlib.util.spec_from_file_location('_telegram_deferred_owner_profile', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.verify_profile
+
+
+class DeferredOwnerCodesigningSource(DirectoryCodesigningSource):
+    """Main-app profile only. Never enumerate profiles or access certificates/keys."""
+
+    def load_data(self, working_dir):
+        # Native Apple CMS/development/device/lifetime verification is mandatory
+        # even when Make.py is used outside the private CI wrapper.
+        try:
+            selected = Path(self.directory_path) / 'selecteddevice.txt'
+            if selected.is_symlink() or not selected.is_file() or not 8 <= selected.stat().st_size <= 66:
+                raise ValueError()
+            with selected.open('rb') as stream:
+                device = stream.read(67).decode('ascii')
+            if device.endswith('\r\n'):
+                device = device[:-2]
+            elif device.endswith('\n'):
+                device = device[:-1]
+            if re.fullmatch(r'[0-9A-Fa-f-]{8,64}', device) is None:
+                raise ValueError()
+            verify_profile = load_deferred_owner_profile_verifier()
+            verified = verify_profile(Path(self.directory_path) / 'profiles' / 'Telegram.mobileprovision', device)
+            if verified['team_id'] != self.team_id or verified['bundle_id'] != self.bundle_id:
+                raise ValueError()
+            raw, aps = verified['profile_data'], verified['aps_environment']
+            if not isinstance(raw, bytes) or not 0 < len(raw) <= 4 * 1024 * 1024 or aps not in ('', 'development', 'production'):
+                raise ValueError()
+            self.profile_data, self.aps_environment = raw, aps
+        except Exception:
+            raise ValueError('Deferred owner profile or selected device verification failed.') from None
+
+    def copy_profiles_to_destination(self, destination_path):
+        os.makedirs(destination_path, exist_ok=True)
+        destination = Path(destination_path) / 'Telegram.mobileprovision'
+        destination.write_bytes(self.profile_data)
+        destination.chmod(0o600)
+
+    def resolve_aps_environment(self):
+        return self.aps_environment
+
+    def copy_certificates_to_destination(self, destination_path):
+        # Signature generation belongs to the owner's later signing step.
+        pass
 
 
 class XcodeManagedCodesigningSource(CodesigningSource):

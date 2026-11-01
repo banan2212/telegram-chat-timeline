@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import plistlib
 import tempfile
+import types
+import sys
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -37,7 +39,7 @@ class BuildBoundaries(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'missing or invalid'):
                 ci.api_values(SOURCE, 'secrets')
 
-    def probe_with_profiles(self, target, expiry, expected=ci.PIN):
+    def probe_with_profiles(self, target, expiry, expected=ci.PIN, **options):
         def fake_command(*args, **kwargs):
             if args[:2] == ('git', 'rev-parse'):
                 return ci.PIN
@@ -61,7 +63,40 @@ class BuildBoundaries(unittest.TestCase):
             stack.enter_context(patch.object(ci, 'read_profile', return_value=profile))
             stack.enter_context(patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': ''}))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            return ci.probe(SOURCE, Path(temporary), target, 'upstream-test', expected)
+            return ci.probe(SOURCE, Path(temporary), target, 'upstream-test', expected, **options)
+
+    def test_owner_mode_requires_actual_verification_and_does_not_emit_identity(self):
+        profile_module = types.SimpleNamespace(
+            verify_profile=lambda *args, **kwargs: {
+                'team_id': 'PRIVATE_TEAM', 'bundle_id': 'PRIVATE_BUNDLE',
+                'public_summary': {'signature_verified': True}},
+            ProfileRejected=ValueError)
+        with patch.dict(sys.modules, {'owner_profile': profile_module}):
+            report = self.probe_with_profiles(
+                'device', dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1),
+                signing_mode='owner-deferred', owner_profile_path=Path('explicit-only.mobileprovision'),
+                expected_device='PRIVATE_DEVICE')
+        self.assertTrue(report['ready_for_selected_build'])
+        self.assertEqual([], report['profiles'])
+        self.assertNotIn('PRIVATE_', json.dumps(report))
+
+    def test_owner_failure_is_closed_and_omits_exception_payload(self):
+        def reject(*args, **kwargs):
+            raise ValueError('PRIVATE_IDENTIFIER_SENTINEL')
+        profile_module = types.SimpleNamespace(verify_profile=reject, ProfileRejected=ValueError)
+        with patch.dict(sys.modules, {'owner_profile': profile_module}):
+            report = self.probe_with_profiles(
+                'device', dt.datetime.now(dt.timezone.utc), signing_mode='owner-deferred',
+                owner_profile_path=Path('explicit-only.mobileprovision'), expected_device='PRIVATE_DEVICE')
+        self.assertFalse(report['ready_for_selected_build'])
+        self.assertNotIn('PRIVATE_', json.dumps(report))
+
+    def test_owner_mode_rejects_missing_input_and_simulator(self):
+        profile_module = types.SimpleNamespace(verify_profile=lambda *a, **k: {}, ProfileRejected=ValueError)
+        with patch.dict(sys.modules, {'owner_profile': profile_module}):
+            report = self.probe_with_profiles('simulator', dt.datetime.now(dt.timezone.utc),
+                                              signing_mode='owner-deferred')
+        self.assertFalse(report['ready_for_selected_build'])
 
     def test_expired_device_profiles_block_device_only(self):
         expiry = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)

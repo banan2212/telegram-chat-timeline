@@ -25,7 +25,7 @@ jobs:
             submodules/MtProtoKit/PublicHeaders
             Tests/ChatTimeline
             ci/chat-timeline
-            build-system/fake-codesigning
+            build-system
           persist-credentials: false
           submodules: false
 
@@ -87,3 +87,12 @@ jobs:
             -o "$RUNNER_TEMP/authorization-diagnostics-tests"
           "$RUNNER_TEMP/authorization-diagnostics-tests"
           printf '%s\n' 'Foundation authorization-diagnostics checks passed. Network integration, full app compilation and authenticated iPhone behavior remain separate.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check deferred owner build boundaries without owner data
+        run: |
+          python3 -B ci/chat-timeline/test_bootstrap.py
+          python3 -B ci/chat-timeline/test_deferred_build_configuration.py
+          python3 -B ci/chat-timeline/test_owner_profile.py
+          python3 -B ci/chat-timeline/test_owner_ci.py
+          python3 -B ci/chat-timeline/test_owner_signing_input.py
+          printf '%s\n' 'Owner build tests use synthetic data. Native CMS rejection smoke checks SDK integration, not acceptance of an actual owner profile.' >> "$GITHUB_STEP_SUMMARY"

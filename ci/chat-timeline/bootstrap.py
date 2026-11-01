@@ -82,7 +82,9 @@ def api_values(source: Path, api_source: str) -> tuple[str, str]:
     return values
 
 
-def probe(source: Path, output: Path, target: str, api_source: str, expected: str) -> dict:
+def probe(source: Path, output: Path, target: str, api_source: str, expected: str,
+          signing_mode: str = 'fixture', owner_profile_path: Path | None = None,
+          expected_device: str | None = None) -> dict:
     native = platform.system() == 'Darwin'
     now = dt.datetime.now(dt.timezone.utc)
     blockers, warnings, device_blockers = [], [], []
@@ -93,6 +95,7 @@ def probe(source: Path, output: Path, target: str, api_source: str, expected: st
               'source_kind': os.environ.get('SOURCE_KIND', 'local'),
               'checked_at': now.isoformat(), 'target': target, 'api_source': api_source,
               'host': platform.system(), 'architecture': platform.machine(),
+              'signing_mode': signing_mode,
               'versions': versions, 'blockers': blockers, 'warnings': warnings,
               'device_signing_blockers': device_blockers, 'profiles': [],
               'compiled': False, 'device_tested': False}
@@ -119,7 +122,20 @@ def probe(source: Path, output: Path, target: str, api_source: str, expected: st
     rb, rw = resource_findings(report['resources'])
     blockers.extend(rb)
     warnings.extend(rw)
-    for name in PROFILES:
+    if signing_mode not in ('fixture', 'owner-deferred'):
+        blockers.append('Unknown signing mode.')
+    if signing_mode == 'owner-deferred':
+        if target != 'device':
+            blockers.append('Owner deferred signing is limited to the device target.')
+        try:
+            from owner_profile import verify_profile, ProfileRejected
+            if owner_profile_path is None or not expected_device:
+                raise ProfileRejected()
+            owner = verify_profile(owner_profile_path, expected_device, now=now)
+            report['owner_profile_checks'] = owner['public_summary']
+        except (OSError, ValueError, RuntimeError, ImportError, TypeError, KeyError):
+            device_blockers.append('Owner profile verification failed; private details are omitted.')
+    for name in (PROFILES if signing_mode == 'fixture' else ()):
         path = source / 'build-system/fake-codesigning/profiles' / (name + '.mobileprovision')
         try:
             profile = read_profile(path)
@@ -133,7 +149,7 @@ def probe(source: Path, output: Path, target: str, api_source: str, expected: st
                 device_blockers.append('Base profile lacks required aps-environment.')
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             device_blockers.append(f'{name} profile could not be checked: {type(exc).__name__}.')
-    for name in ('Public.cer', 'SelfSigned.p12'):
+    for name in (('Public.cer', 'SelfSigned.p12') if signing_mode == 'fixture' else ()):
         if not (source / 'build-system/fake-codesigning/certs' / name).is_file():
             device_blockers.append('Missing public fixture ' + name)
     if target == 'device':
@@ -164,12 +180,19 @@ def probe(source: Path, output: Path, target: str, api_source: str, expected: st
     return report
 
 
-def prepare(source: Path, output: Path, target: str, api_source: str, expected: str) -> None:
-    report = probe(source, output, target, api_source, expected)
+def prepare(source: Path, output: Path, target: str, api_source: str, expected: str,
+            signing_mode: str = 'fixture', owner_profile_path: Path | None = None,
+            expected_device: str | None = None) -> None:
+    report = probe(source, output, target, api_source, expected,
+                   signing_mode, owner_profile_path, expected_device)
     if report['blockers']:
         raise SystemExit('Build stopped by preflight. See preflight.json; no bypass flag exists.')
     api_id, api_hash = api_values(source, api_source)
-    if target == 'device':
+    if signing_mode == 'owner-deferred':
+        from owner_profile import verify_profile
+        owner = verify_profile(owner_profile_path, expected_device)
+        team_id, bundle_id = owner['team_id'], owner['bundle_id']
+    elif target == 'device':
         base = read_profile(source / 'build-system/fake-codesigning/profiles/Telegram.mobileprovision')
         team_id, bundle_id = base['Entitlements']['application-identifier'].split('.', 1)
     else:
