@@ -44,8 +44,8 @@ jobs:
       SOURCE_KIND: ${{ inputs.operation == 'feature' && 'feature' || 'baseline' }}
       EXPECTED_REVISION: ${{ inputs.operation == 'feature' && github.sha || 'fb0e62ba8a147f0821da6aa63c09da7d79a10111' }}
       SOURCE_REPOSITORY: ${{ inputs.operation == 'feature' && github.repository || 'TelegramMessenger/Telegram-iOS' }}
-      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      TELEGRAM_API_ID: ${{ inputs.api_source == 'secrets' && secrets.TELEGRAM_API_ID || '' }}
+      TELEGRAM_API_HASH: ${{ inputs.api_source == 'secrets' && secrets.TELEGRAM_API_HASH || '' }}
     steps:
       - name: Checkout CI tools from the dispatched commit
         uses: actions/checkout@v4
