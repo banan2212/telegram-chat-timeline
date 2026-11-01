@@ -1,0 +1,44 @@
+name: Chat Timeline - read-only Xcode DDI probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-timeline-ddi-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # Same standard public-repository runner as the approved build workflow.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: xcode-27
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout only the probe from the dispatched revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: ci/chat-timeline
+          persist-credentials: false
+          submodules: false
+
+      - name: Inspect fixed installed Xcode 27.1 DDI paths
+        run: |
+          python3 ci/chat-timeline/probe_ddi.py \
+            --output "$RUNNER_TEMP/chat-timeline-ddi-probe.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve the compact probe result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-timeline-ddi-probe-${{ github.run_id }}
+          path: ${{ runner.temp }}/chat-timeline-ddi-probe.json
+          retention-days: 3
+          if-no-files-found: error
