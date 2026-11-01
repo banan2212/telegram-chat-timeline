@@ -105,6 +105,9 @@ def encrypt_artifact(payload: Path, recipient: Path, output: Path, *, outcome: s
 
 
 def execute(source: Path, private: Path, output: Path) -> None:
+    api_source = os.environ.get('API_SOURCE', '')
+    if api_source not in ('secrets', 'upstream-test'):
+        raise PrivateBuildRejected('API source must be explicitly selected; no fallback is performed.')
     os.umask(0o077)
     # New, dedicated directory only. Never reuse an unrelated temporary folder.
     private.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -126,9 +129,15 @@ def execute(source: Path, private: Path, output: Path) -> None:
         raise PrivateBuildRejected('Expected revision is invalid.')
     # Same toolchain, resource and provenance guards as the existing device build.
     # This explicit mode validates the actual profile instead of expired fixtures.
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        bootstrap.prepare(source, report_directory, 'device', 'upstream-test', expected,
-                          'owner-deferred', profile_path, device)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            bootstrap.prepare(source, report_directory, 'device', api_source, expected,
+                              'owner-deferred', profile_path, device)
+    finally:
+        # The validated private configuration is the build input. Compiler and
+        # encryption subprocesses do not need API credentials in their environment.
+        os.environ.pop('TELEGRAM_API_ID', None)
+        os.environ.pop('TELEGRAM_API_HASH', None)
     print('Owner profile and build preflight passed. Starting the device build.', flush=True)
     run_private([sys.executable, '-u', 'build-system/Make/Make.py',
                  '--bazelUserRoot=' + str(private / 'bazel'), 'build',

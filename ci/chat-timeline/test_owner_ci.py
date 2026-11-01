@@ -1,6 +1,7 @@
 """Private CI envelope and cleanup boundaries; no owner profiles or keys."""
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -13,6 +14,116 @@ import unittest
 from unittest.mock import patch, Mock
 
 import owner_ci as ci
+
+
+class ApiSourceBoundaries(unittest.TestCase):
+    @contextlib.contextmanager
+    def fixture(self, mode, credentials=None, preflight_failure=False):
+        # No ambient API environment or real configuration is used by these tests.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+            root = Path(temporary).resolve()
+            source, runner = root / 'source', root / 'runner'
+            (source / 'build-system').mkdir(parents=True)
+            runner.mkdir()
+            private = runner / 'chat-timeline-owner-private'
+            output = runner / 'chat-timeline-owner-encrypted'
+            sample = json.dumps({'api_id': '777111', 'api_hash': 'a' * 32}).encode()
+            (source / 'build-system/appstore-configuration.json').write_bytes(sample)
+            owner = {'version': 1, 'profile_der_b64': base64.b64encode(b'fixture' * 100).decode(),
+                     'device': '12345678-1234567890ABCDEF',
+                     'recipient_certificate_pem': '-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n'}
+            environment = {'CHAT_TIMELINE_OWNER_INPUT': json.dumps(owner),
+                           'EXPECTED_REVISION': 'a' * 40, 'GITHUB_RUN_NUMBER': '1',
+                           'GITHUB_WORKSPACE': str(root), 'RUNNER_TEMP': str(runner)}
+            if mode is not None:
+                environment['API_SOURCE'] = mode
+            environment.update(credentials or {})
+            state = {'source': source, 'private': private, 'output': output, 'prepare_modes': [],
+                     'stdout': io.StringIO(), 'stderr': io.StringIO()}
+
+            def prepare(source, directory, target, api_source, *args):
+                state['prepare_modes'].append(api_source)
+                state['validated_values'] = ci.bootstrap.api_values(source, api_source)
+                print('PRIVATE_OUTPUT_SENTINEL')
+                print('PRIVATE_OUTPUT_SENTINEL', file=sys.stderr)
+                if preflight_failure:
+                    raise ValueError('PRIVATE_EXCEPTION_SENTINEL')
+                directory.mkdir()
+                (directory / 'configuration.json').write_text('{"fixture":true}')
+
+            def build(*args, **kwargs):
+                self.assertTrue('TELEGRAM_API_ID' not in os.environ)
+                self.assertTrue('TELEGRAM_API_HASH' not in os.environ)
+
+            def package(*, output, **kwargs):
+                output.mkdir()
+                (output / 'fixture.txt').write_text('synthetic packaging fixture')
+
+            stack.enter_context(patch.dict(os.environ, environment, clear=True))
+            stack.enter_context(patch.object(ci.os, 'umask'))
+            stack.enter_context(patch.object(ci.bootstrap, 'SAMPLE_SHA256', hashlib.sha256(sample).hexdigest()))
+            stack.enter_context(patch.object(ci.bootstrap, 'prepare', side_effect=prepare))
+            state['build'] = stack.enter_context(patch.object(ci, 'run_private', side_effect=build))
+            state['encrypt'] = stack.enter_context(patch.object(ci, 'encrypt_artifact'))
+            stack.enter_context(patch('owner_profile.verify_profile', return_value={}))
+            stack.enter_context(patch('owner_signing_input.package_input', side_effect=package))
+            stack.enter_context(contextlib.redirect_stdout(state['stdout']))
+            stack.enter_context(contextlib.redirect_stderr(state['stderr']))
+            yield state
+
+    def test_explicit_modes_route_to_the_selected_configuration(self):
+        credentials = {'TELEGRAM_API_ID': '777222', 'TELEGRAM_API_HASH': 'b' * 32}
+        for mode, expected in (('secrets', ('777222', 'b' * 32)),
+                               ('upstream-test', ('777111', 'a' * 32))):
+            with self.subTest(mode=mode), self.fixture(mode, credentials) as state:
+                ci.execute(state['source'], state['private'], state['output'])
+                self.assertEqual([mode], state['prepare_modes'])
+                self.assertTrue(expected == state['validated_values'])
+                state['build'].assert_called_once()
+                state['encrypt'].assert_called_once()
+                text = state['stdout'].getvalue() + state['stderr'].getvalue()
+                self.assertFalse(any(value in text for value in (*expected, 'PRIVATE_OUTPUT_SENTINEL')))
+
+    def test_missing_or_invalid_secrets_do_not_fall_back_to_available_sample(self):
+        for credentials in ({}, {'TELEGRAM_API_ID': '777222'}, {'TELEGRAM_API_HASH': 'b' * 32},
+                            {'TELEGRAM_API_ID': 'PRIVATE_INVALID_ID', 'TELEGRAM_API_HASH': 'b' * 32},
+                            {'TELEGRAM_API_ID': '777222', 'TELEGRAM_API_HASH': 'PRIVATE_INVALID_HASH'}):
+            with self.fixture('secrets', credentials) as state:
+                with self.assertRaises(ValueError) as error:
+                    ci.execute(state['source'], state['private'], state['output'])
+                self.assertEqual(['secrets'], state['prepare_modes'])
+                state['build'].assert_not_called()
+                state['encrypt'].assert_not_called()
+                self.assertTrue('TELEGRAM_API_ID' not in os.environ)
+                self.assertTrue('TELEGRAM_API_HASH' not in os.environ)
+                text = str(error.exception) + state['stdout'].getvalue() + state['stderr'].getvalue()
+                self.assertFalse(any(value and value in text for value in credentials.values()))
+
+    def test_missing_or_malformed_mode_stops_before_private_files_or_preflight(self):
+        for mode in (None, '', 'SECRETS', 'secrets ', 'upstream-test\n', 'PRIVATE_INVALID_MODE'):
+            with self.fixture(mode) as state:
+                with self.assertRaises(ci.PrivateBuildRejected) as error:
+                    ci.execute(state['source'], state['private'], state['output'])
+                self.assertFalse(state['private'].exists())
+                self.assertEqual([], state['prepare_modes'])
+                state['build'].assert_not_called()
+                self.assertNotIn('PRIVATE_INVALID_MODE', str(error.exception))
+
+    def test_preflight_exception_and_output_stay_private_at_entry_point(self):
+        credentials = {'TELEGRAM_API_ID': '777222', 'TELEGRAM_API_HASH': 'b' * 32}
+        with self.fixture('secrets', credentials, preflight_failure=True) as state, \
+                patch.object(ci, 'cleanup_private'), \
+                patch.object(sys, 'argv', ['owner_ci', '--source', str(state['source']),
+                                          '--private', str(state['private']), '--output', str(state['output'])]):
+            with self.assertRaises(SystemExit) as error:
+                ci.main()
+            self.assertEqual(1, error.exception.code)
+            state['build'].assert_not_called()
+            state['encrypt'].assert_not_called()
+            text = state['stdout'].getvalue() + state['stderr'].getvalue()
+            self.assertIn('Owner build did not finish.', text)
+            self.assertFalse(any(value in text for value in (*credentials.values(), 'PRIVATE_OUTPUT_SENTINEL',
+                                                             'PRIVATE_EXCEPTION_SENTINEL')))
 
 
 class InputBoundaries(unittest.TestCase):

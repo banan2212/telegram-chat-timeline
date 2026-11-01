@@ -29,11 +29,31 @@ Only this JSON is supplied as the repository Actions secret
 machine. The secret must be removed after the approved build. There is no profile
 discovery or credential lookup in the workflow, and no pull-request trigger.
 
+## Explicit API source
+
+The manual workflow requires an `api_source` choice and defaults to `secrets`:
+
+| Choice | Required input | Behavior |
+| --- | --- | --- |
+| `secrets` | Repository Actions secrets `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the owner's Telegram API application | Validate both values; stop if either is missing or invalid. |
+| `upstream-test` | Explicit selection of this testing mode | Use only the reviewed, checksum-pinned public upstream sample; Telegram server limitations apply. |
+
+There is no automatic switch to the sample. The Python entry point requires an
+explicit `API_SOURCE` environment value from this closed set; missing or unknown
+values are rejected before private build files are created. The workflow supplies
+API secrets only to the consuming preflight/build step, and only in `secrets` mode.
+After preflight, these environment variables are removed before compiler and
+encryption subprocesses run. The validated configuration remains private and is
+removed by the existing cleanup. No API value is printed or added to the public
+artifact receipt. Supplying API application credentials does not replace the
+owner's Telegram login or prove that authentication works.
+
 ## Build checks
 
 The manual `chat-timeline-owner-device.yml` workflow checks out its exact commit on
 the standard free `xcode-27` runner. It retains Xcode/macOS/Bazel, source provenance,
-public upstream test API provenance, resource and pinned-submodule checks.
+the selected API configuration validation, resource and pinned-submodule checks.
+The public sample provenance check remains mandatory for `upstream-test` mode.
 
 `owner_profile.py` verifies the CMS content signature and evaluates Apple's native
 provisioning-signing policy plus certificate validity. It rejects unavailable

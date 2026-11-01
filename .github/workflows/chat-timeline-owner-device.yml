@@ -2,6 +2,15 @@ name: Chat Timeline - private owner profile device preparation
 
 on:
   workflow_dispatch:
+    inputs:
+      api_source:
+        description: API configuration source (upstream-test is limited to explicit testing)
+        type: choice
+        required: true
+        default: secrets
+        options:
+          - secrets
+          - upstream-test
 
 permissions:
   contents: read
@@ -64,6 +73,9 @@ jobs:
           # Explicit owner-approved input only. No automatic profile/key discovery.
           # JSON contains one profile, exact device ID, public encryption certificate.
           CHAT_TIMELINE_OWNER_INPUT: ${{ secrets.CHAT_TIMELINE_OWNER_INPUT }}
+          API_SOURCE: ${{ inputs.api_source }}
+          TELEGRAM_API_ID: ${{ inputs.api_source == 'secrets' && secrets.TELEGRAM_API_ID || '' }}
+          TELEGRAM_API_HASH: ${{ inputs.api_source == 'secrets' && secrets.TELEGRAM_API_HASH || '' }}
         run: |
           python3 ci/chat-timeline/owner_ci.py --source . \
             --private "$RUNNER_TEMP/chat-timeline-owner-private" \
