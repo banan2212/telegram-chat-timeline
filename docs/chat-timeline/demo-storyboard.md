@@ -13,6 +13,8 @@ Target: about 20 seconds, square 1080×1080 or higher, clear iPhone framing, min
 
 Use an accessible public channel containing the selected dates. Pick dates from actual test results, not invented example content. Avoid personal chats, phone numbers, authentication screens, or unapproved messages in the capture.
 
+A long personal conversation is not required. The selected candidate is [Telegram Tips](https://t.me/TelegramTips), using its existing public posts. Select the start and destination only after verifying both in the native app. Keep ordinary cloud-chat acceptance separate; a short real conversation can exercise Cancel, Jump and Return, while the public channel supplies the wider date range. Do not manufacture old messages to make the history look larger.
+
 Compose framing and intentional camera crops around the genuine recording. Do not redraw the preview, date slider, or navigation in post-production. Editing may remove idle setup, but must not hide functional failures or turn a non-working prototype into an apparent working feature.
 
 Record a separate uncut verification take that includes cancel, return after a new message, theme changes, and slow/error states. The short promotional cut is not the full acceptance evidence.
