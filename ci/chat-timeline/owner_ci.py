@@ -21,7 +21,7 @@ import sys
 import zipfile
 
 import bootstrap
-from private_cleanup import PrivateCleanupError, cleanup_private
+from private_cleanup import PrivateCleanupError, private_cleanup_scope
 
 
 class PrivateBuildRejected(RuntimeError):
@@ -213,26 +213,30 @@ def main() -> None:
     except BaseException:
         # Never serialize exception text, a profile, config, or private compiler log.
         print('Owner build did not finish. No raw private diagnostics are published.', file=sys.stderr)
-        try:
-            protect_failure_log(private, output)
-        except Exception:
-            print('Private failure evidence could not be encrypted.', file=sys.stderr)
         exit_code = 1
     finally:
         try:
-            cleanup_configuration(source)
-        except BaseException:
-            print('Private generated configuration cleanup failed.', file=sys.stderr)
+            # A cancelled step can overlap the workflow fallback. Protect
+            # failure evidence, generated configuration and private-tree deletion
+            # with one lock so the fallback cannot delete an archive being written.
+            with private_cleanup_scope(private, runner_temp) as remove_private:
+                if exit_code:
+                    try:
+                        protect_failure_log(private, output)
+                    except BaseException:
+                        print('Private failure evidence could not be encrypted.', file=sys.stderr)
+                try:
+                    cleanup_configuration(source)
+                except BaseException:
+                    print('Private generated configuration cleanup failed.', file=sys.stderr)
+                    exit_code = 1
+                remove_private()
+        except PrivateCleanupError as error:
+            print(f'Private temporary directory cleanup failed. {error.summary}.', file=sys.stderr)
             exit_code = 1
-        finally:
-            try:
-                cleanup_private(private, runner_temp)
-            except PrivateCleanupError as error:
-                print(f'Private temporary directory cleanup failed. stage={error.stage} reason={error.reason}.', file=sys.stderr)
-                exit_code = 1
-            except BaseException:
-                print('Private temporary directory cleanup failed.', file=sys.stderr)
-                exit_code = 1
+        except BaseException:
+            print('Private temporary directory cleanup failed.', file=sys.stderr)
+            exit_code = 1
     if exit_code:
         raise SystemExit(exit_code)
 

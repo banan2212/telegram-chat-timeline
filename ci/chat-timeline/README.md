@@ -32,7 +32,7 @@ Local CI guard checks: `python -B ci/chat-timeline/test_bootstrap.py`. These che
 
 The QR interface is opt-in through the main app's Boolean `ChatTimelineQRLoginEnabled`. The owner signing-input packager enables it before sealing the app; the ordinary simulator workflow compiles the QR modules but leaves the button disabled. [QR-LOGIN.md](QR-LOGIN.md) describes reproduction, approval, cancellation and the remaining verification limits.
 
-For native QR code commit `5db23d16da7fb15154ffb49b45be55e2b2f0e6f4`, [focused run 41342512328](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41342512328) passed. At the 2026-11-01 checkpoint, [full simulator run 41343133592](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41343133592) is still in progress on `966c6e2498149b084295ec9631892d2bfaa36a66`; that later commit only restricts workflow API-secret injection to explicit `secrets` mode. A successful full compile, QR approval and physical-iPhone Timeline acceptance remain separate checks.
+Native QR code `5db23d16da7fb15154ffb49b45be55e2b2f0e6f4` passed focused checks, but [full simulator41343133592](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41343133592) failed on two incompatible NavigationController presentation calls. Fix [`30d4e0bf6bb1bab16a5ed10245b59efb5f9d6a47`](https://github.com/banan2212/telegram-chat-timeline/commit/30d4e0bf6bb1bab16a5ed10245b59efb5f9d6a47) uses the root WindowHost and guards a missing window. [Focused41347494113](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41347494113) passed; [new simulator41347496635](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41347496635) is compiling the corrected source at the2026-11-01 checkpoint. Full compilation, QR approval and physical-iPhone Timeline acceptance remain separate checks.
 
 ## API configuration
 
@@ -54,10 +54,16 @@ private input, native Apple trust checks and later owner signing. It does not al
 the fixture guard. Earlier [owner run 41328740015](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41328740015)
 completed compilation and encrypted packaging, but its **overall result was failure**
 because private-directory cleanup failed. That run predates the QR implementation.
-The owner authorized one new QR build: [run 41343667365](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41343667365),
-source `966c6e2498149b084295ec9631892d2bfaa36a66`, is preparing dependencies at the
-2026-11-01 checkpoint. It has no successful build result yet. Profile values remain
-private. The later cleanup fix does not establish cleanup of the old runner.
+The owner authorized one QR build: [41343667365](https://github.com/banan2212/telegram-chat-timeline/actions/runs/41343667365),
+source `966c6e2498149b084295ec9631892d2bfaa36a66`. It passed native profile/build
+preflight at19:50:16UTC, then was deliberately cancelled because the simulator
+identified the same unconditional native code error. Its result is CANCELLED,
+not a completed build. Cleanup also FAILED (`stage=remove_tree reason=changed`);
+runner-file/profile deletion and physical VM erasure are unproven. The temporary
+secret was deleted and absence verified; this does not prove runner cleanup.
+Cleanup is under investigation. No new owner build or profile transfer has occurred,
+and no new transfer consent has been requested. Profile values remain private.
+The earlier cleanup fix does not establish cleanup of either failed-cleanup runner.
 
 A device candidate inherits the fixture bundle ID so its provisioning matches. **Do not install it over the user's normal Telegram.** A later local signing process must create a distinct application and consistent extension/App Group identifiers, then validate launch, data separation and features on the iPhone. That process is not implemented or proven by this CI. No Apple ID, private certificate or password is collected here.
 

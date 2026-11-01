@@ -112,7 +112,6 @@ class ApiSourceBoundaries(unittest.TestCase):
     def test_preflight_exception_and_output_stay_private_at_entry_point(self):
         credentials = {'TELEGRAM_API_ID': '777222', 'TELEGRAM_API_HASH': 'b' * 32}
         with self.fixture('secrets', credentials, preflight_failure=True) as state, \
-                patch.object(ci, 'cleanup_private'), \
                 patch.object(sys, 'argv', ['owner_ci', '--source', str(state['source']),
                                           '--private', str(state['private']), '--output', str(state['output'])]):
             with self.assertRaises(SystemExit) as error:
@@ -207,10 +206,15 @@ class InputBoundaries(unittest.TestCase):
                 source.mkdir(); runner.mkdir()
                 private, output = runner / 'chat-timeline-owner-private', runner / 'chat-timeline-owner-encrypted'
                 stderr = io.StringIO()
+                @contextlib.contextmanager
+                def failed_scope(*_):
+                    def remove():
+                        raise failure
+                    yield remove
                 with patch.dict(os.environ, {'GITHUB_WORKSPACE': str(root), 'RUNNER_TEMP': str(runner)}), \
                         patch.object(sys, 'argv', ['owner_ci', '--source', str(source), '--private', str(private), '--output', str(output)]), \
                         patch.object(ci, 'execute', side_effect=lambda *_: private.mkdir()), \
-                        patch.object(ci, 'cleanup_private', side_effect=failure), \
+                        patch.object(ci, 'private_cleanup_scope', failed_scope), \
                         contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as error:
                         ci.main()

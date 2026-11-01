@@ -103,13 +103,16 @@ jobs:
               source = pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve() / 'source'
               if (source / 'ci/chat-timeline/private_cleanup.py').is_file():
                   sys.path.insert(0, str(source / 'ci/chat-timeline'))
-                  from private_cleanup import PrivateCleanupError, cleanup_private
-                  try:
-                      cleanup_private(path, root)
-                  except PrivateCleanupError as error:
-                      raise SystemExit(f'Private runner cleanup failed: stage={error.stage} reason={error.reason}.') from None
+                  from private_cleanup import PrivateCleanupError, private_cleanup_scope
                   from owner_ci import cleanup_configuration
-                  cleanup_configuration(source)
+                  try:
+                      with private_cleanup_scope(path, root) as remove_private:
+                          try:
+                              cleanup_configuration(source)
+                          finally:
+                              remove_private()
+                  except PrivateCleanupError as error:
+                      raise SystemExit(f'Private runner cleanup failed: {error.summary}.') from None
               elif path.exists() or path.is_symlink():
                   raise ValueError()
           except Exception:
